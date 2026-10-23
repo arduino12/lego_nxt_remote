@@ -9,8 +9,10 @@ checking motor behaviour before trusting it in the web app.
   python nxt_probe.py --usb press right enter    # front-panel buttons: left / enter / right / exit
   python nxt_probe.py --usb bt                   # Bluetooth on/visible state
   python nxt_probe.py --usb beep
-  python nxt_probe.py --usb move B 360           # tacho-limited move, prints where it ended
-  python nxt_probe.py --usb limittest B          # does a new tacho limit count from the current position?
+  python nxt_probe.py --usb get ABC              # motor state (rotation counter, run state)
+  python nxt_probe.py --usb move BC 360 [power]  # tacho-limited move, prints where it ended
+  python nxt_probe.py --usb limittest BC 120 3   # does a new tacho limit count from the current position?
+  python nxt_probe.py --usb serve cmds.txt out.txt   # keep the brick awake, run commands appended to cmds.txt
 """
 import argparse
 import struct
@@ -146,16 +148,136 @@ def bt_text(s):
     return 'ON, ' + ('visible' if s & 0x01 else 'hidden') + (', connected' if s & 0x02 else '')
 
 
-def wait_idle(nxt, port, timeout=10):
+def wait_idle(nxt, ports, timeout=10):
+    """Poll until every port reports RUN_IDLE or nothing has moved for 0.7 s."""
     t0, last, last_change = time.time(), None, time.time()
     while time.time() - t0 < timeout:
-        s = nxt.get_output(port)
-        if s['rotation'] != last:
-            last, last_change = s['rotation'], time.time()
-        if s['run'] == RUN_IDLE or time.time() - last_change > 0.7:
+        s = [nxt.get_output(p) for p in ports]
+        rot = [x['rotation'] for x in s]
+        if rot != last:
+            last, last_change = rot, time.time()
+        if all(x['run'] == RUN_IDLE for x in s) or time.time() - last_change > 0.7:
             return s
         time.sleep(0.05)
-    return nxt.get_output(port)
+    return [nxt.get_output(p) for p in ports]
+
+
+def run(nxt, cmd, args, out):
+    """One probe command; `out` prints a line. Shared by the CLI and `serve`."""
+    def show_screen():
+        buf, popup = nxt.screen()
+        out(render(buf) + ('\n(popup layer)' if popup else ''))
+
+    if cmd == 'info':
+        for k, v in nxt.info().items():
+            out(f'{k:11} {v}')
+        out(f'{"bluetooth":11} {bt_text(nxt.bt_state())}')
+    elif cmd == 'screen':
+        show_screen()
+    elif cmd == 'press':
+        for b in args:
+            nxt.press(b)
+            time.sleep(0.7)
+        show_screen()
+    elif cmd == 'bt':
+        out(bt_text(nxt.bt_state()))
+    elif cmd == 'beep':
+        nxt.req(DIRECT, 0x03, struct.pack('<HH', 880, 300), reply=False)
+    elif cmd == 'get':
+        for p in args[0].upper():
+            out(f'{p}: {nxt.get_output(PORTS[p])}')
+    elif cmd == 'reset':   # zero RotationCount (absolute position)
+        for p in args[0].upper():
+            nxt.req(DIRECT, 0x0A, bytes([PORTS[p], 0]))
+        out('rotation counters zeroed')
+    elif cmd == 'brake':
+        nxt.brake()
+    elif cmd == 'trace':
+        # trace B 360 [power] [seconds] : start a tacho-limited move and sample the motor state over time
+        port, deg = PORTS[args[0].upper()], int(args[1])
+        power = int(args[2]) if len(args) > 2 else 50
+        secs = float(args[3]) if len(args) > 3 else 1.5
+        s0 = nxt.get_output(port)
+        out(f'before: {s0}')
+        t0 = time.time()
+        nxt.set_output(port, power if deg > 0 else -power, abs(deg), reply=False)
+        while time.time() - t0 < secs:
+            s = nxt.get_output(port)
+            out(f'{(time.time() - t0) * 1000:6.0f} ms  run 0x{s["run"]:02x} pw {s["power"]:4d}  tacho {s["tacho"] - s0["tacho"]:+5d}'
+                f'  block {s["block"] - s0["block"]:+5d}  rot {s["rotation"] - s0["rotation"]:+5d}')
+    elif cmd in ('move', 'limittest'):
+        # move BC 360 [power]         : one tacho-limited move on each listed port
+        # limittest BC 120 3 [power]  : repeated limited moves - does each new limit count from where the motor is?
+        ports = [PORTS[p] for p in args[0].upper()]
+        deg = int(args[1])
+        reps = int(args[2]) if cmd == 'limittest' and len(args) > 2 else 1
+        power = int(args[3 if cmd == 'limittest' else 2]) if len(args) > (3 if cmd == 'limittest' else 2) else 50
+        first = [nxt.get_output(p)['rotation'] for p in ports]
+        for i in range(reps):
+            start = [nxt.get_output(p)['rotation'] for p in ports]
+            t0 = time.time()
+            for p in ports:
+                nxt.set_output(p, power if deg > 0 else -power, abs(deg), reply=False)
+            end = wait_idle(nxt, ports)
+            out(f'move {i + 1}: limit {deg:+d} -> moved ' + ', '.join(f'{args[0].upper()[j]} {end[j]["rotation"] - start[j]:+d}' for j in range(len(ports)))
+                + f' in {time.time() - t0:.2f}s (tacho {[e["tacho"] for e in end]}, block {[e["block"] for e in end]})')
+        time.sleep(0.3)
+        final = [nxt.get_output(p)['rotation'] for p in ports]
+        out('after settling: ' + ', '.join(f'{args[0].upper()[j]} rotation {final[j]} (total {final[j] - first[j]:+d})' for j in range(len(ports))))
+    else:
+        out(f'unknown command {cmd}')
+
+
+def serve(make_link, cmd_path, out_path):
+    """Wait for the brick, keep it awake, and run commands appended to cmd_path (one per
+    line, same syntax as the CLI). Output is appended to out_path. For a brick that
+    switches itself off before you can type the next command."""
+    import os
+
+    def log(s):
+        with open(out_path, 'a', encoding='utf-8') as f:
+            f.write(s + '\n')
+
+    open(cmd_path, 'a').close()
+    done = os.path.getsize(cmd_path)
+    nxt = None
+    last_keep = 0
+    last_mv = 0
+    while True:
+        try:
+            if nxt is None:
+                nxt = Nxt(make_link())
+                nxt.req(DIRECT, 0x0D)   # KEEPALIVE resets the sleep timer
+                log(f'=== connected {time.strftime("%H:%M:%S")}: {nxt.info()}, bluetooth {bt_text(nxt.bt_state())}')
+            if time.time() - last_keep > 5:
+                nxt.req(DIRECT, 0x0D)
+                mv = struct.unpack_from('<H', nxt.req(DIRECT, 0x0B), 3)[0]
+                if abs(mv - last_mv) >= 100:
+                    log(f'{time.strftime("%H:%M:%S")} battery {mv} mV')
+                    last_mv = mv
+                last_keep = time.time()
+            size = os.path.getsize(cmd_path)
+            if size > done:
+                with open(cmd_path, encoding='utf-8') as f:
+                    f.seek(done)
+                    lines = f.read().splitlines()
+                done = size
+                for line in filter(None, (l.strip() for l in lines)):
+                    cmd, *args = line.split()
+                    log(f'> {line}')
+                    try:
+                        run(nxt, cmd, args, log)
+                    except (IOError, ValueError, KeyError, IndexError) as e:
+                        log(f'error: {e!r}')
+                    log('<')
+            time.sleep(0.2)
+        except SystemExit:
+            time.sleep(0.3)   # not on USB yet
+        except Exception as e:
+            if nxt is not None:
+                log(f'=== lost {time.strftime("%H:%M:%S")}: {e!r}')
+            nxt = None
+            time.sleep(0.3)
 
 
 def main():
@@ -163,46 +285,15 @@ def main():
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument('--usb', action='store_true')
     g.add_argument('--port', help='Bluetooth outgoing COM port, e.g. COM12')
-    ap.add_argument('cmd', choices=['info', 'screen', 'press', 'bt', 'beep', 'move', 'limittest'])
+    ap.add_argument('cmd')
     ap.add_argument('args', nargs='*')
     a = ap.parse_args()
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')
-    nxt = Nxt(UsbLink() if a.usb else SerialLink(a.port))
-
-    if a.cmd == 'info':
-        for k, v in nxt.info().items():
-            print(f'{k:11} {v}')
-        print(f'{"bluetooth":11} {bt_text(nxt.bt_state())}')
-    elif a.cmd == 'screen':
-        buf, popup = nxt.screen()
-        print(render(buf) + ('\n(popup layer)' if popup else ''))
-    elif a.cmd == 'press':
-        for b in a.args:
-            nxt.press(b)
-            time.sleep(0.6)
-        buf, popup = nxt.screen()
-        print(render(buf) + ('\n(popup layer)' if popup else ''))
-    elif a.cmd == 'bt':
-        print(bt_text(nxt.bt_state()))
-    elif a.cmd == 'beep':
-        nxt.req(DIRECT, 0x03, struct.pack('<HH', 880, 300), reply=False)
-    elif a.cmd == 'move':
-        port, deg = PORTS[a.args[0].upper()], int(a.args[1])
-        power = int(a.args[2]) if len(a.args) > 2 else 60
-        start = nxt.get_output(port)['rotation']
-        nxt.set_output(port, power if deg > 0 else -power, abs(deg))
-        end = wait_idle(nxt, port)
-        print(f'asked {deg:+d}, moved {end["rotation"] - start:+d} (rotation {start} -> {end["rotation"]}), state {end}')
-    elif a.cmd == 'limittest':
-        port = PORTS[(a.args or ['B'])[0].upper()]
-        for i in range(3):
-            start = nxt.get_output(port)['rotation']
-            nxt.set_output(port, 50, 180)
-            end = wait_idle(nxt, port)
-            print(f'move {i + 1}: limit 180 -> moved {end["rotation"] - start:+d}, tacho {end["tacho"]}, block {end["block"]}')
-        print('relative limits work' if abs(end['rotation'] - start) > 90 else 'limit is absolute: the app must use soft limits')
-        nxt.brake()
+    make_link = UsbLink if a.usb else lambda: SerialLink(a.port)
+    if a.cmd == 'serve':
+        return serve(make_link, *a.args[:2])
+    run(Nxt(make_link()), a.cmd, a.args, print)
 
 
 if __name__ == '__main__':

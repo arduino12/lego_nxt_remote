@@ -3,20 +3,23 @@
 // wheels; one turn moves the robot one lane sideways, and between turns both must rest at
 // "home" (RotationCount a multiple of 360, flat side down) or they drag on the floor.
 // All targets are absolute RotationCount values, so position errors never accumulate.
-import { PORT_A, PORT_B, PORT_C, MODE_ON, MODE_BRAKE, MODE_REGULATED, REG_SPEED, REG_SYNC, RUN_IDLE, RUN_RUNNING } from './nxt.js';
+import { PORT_A, PORT_B, PORT_C, MODE_ON, MODE_BRAKE, MODE_REGULATED, REG_SPEED, RUN_RUNNING } from './nxt.js';
 
 export const DEFAULTS = {
   invA: false, invB: false, invC: false, invSide: false,
   drivePower: 75,      // joystick full scale and path driving, %
   sidePower: 60,       // side steps, %
-  fixPower: 25,        // correction passes, %
+  fixPower: 15,        // correction passes, % (regulated 15 % lands within ~1° - measured)
   cmPerDegA: 0.0489,   // 5.6 cm wheel on the motor axle; calibrate in the Brick tab
   stepCm: 5,           // sideways travel per B+C turn
   tolDeg: 4,           // close enough to a target / to home
-  deadman: true,       // joystick drive runs in short tacho-limited chunks
+  deadman: true,       // joystick drive runs in tacho-limited chunks that run out if the link drops
 };
 
-const POLL_MS = 50, STALL_MS = 700, MOVE_TIMEOUT_MS = 20000, DEADMAN_S = 0.5;
+const STALL_MS = 800, MOVE_TIMEOUT_MS = 20000, SETTLE_MS = 80, POLL_MS = 5, SPEED_WINDOW_MS = 20;
+const BRAKE_S = 0.055;      // braking stops a motor within ~55 ms of travel (measured at 25-80 %)
+const DEADMAN_S = 0.6;      // joystick drive keeps going this long after the last command
+const MIN_LIMIT = 250;      // firmware 1.01 ignores tacho limits much below ~110°
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const mod360 = d => ((d % 360) + 360) % 360;
 
@@ -27,7 +30,7 @@ export class Robot {
     this.nxt = nxt;
     this.cfg = cfg;
     this.aTarget = null;     // absolute A target during a path run
-    this.softLimit = false;  // set if the firmware ignores tacho limits; then we stop motors ourselves
+    this.rtt = 30;           // ms per request, measured as we go
     this.abortGen = 0;
     this.drivePower = 0;
     this.sideBusy = false;
@@ -55,7 +58,7 @@ export class Robot {
       return true;
     }
     if (this.drivePower === 0 && !(await this.isHome())) await this.goHome();
-    const limit = this.cfg.deadman && !this.softLimit ? Math.max(90, Math.abs(power) * 9 * DEADMAN_S) : 0;
+    const limit = this.cfg.deadman ? Math.max(MIN_LIMIT, Math.abs(power) * 9 * DEADMAN_S) : 0;   // ~9 °/s per %
     await this.nxt.setOutput(PORT_A, power * this.sign(PORT_A), MODE_ON | MODE_BRAKE | MODE_REGULATED, REG_SPEED, 0, RUN_RUNNING, limit);
     this.drivePower = power;
     return true;
@@ -131,72 +134,75 @@ export class Robot {
   }
 
   // ------------------------------------------------------------ closed loop
-  // First pass at full power with the firmware's tacho limit (B+C synchronised when they
-  // turn the same way), then slow correction passes until every motor is within tolDeg.
+  // The stock firmware's own tacho limits can't position precisely (1.01 cuts power ~110°
+  // early, lands ±25° off and ignores moves under ~90°), so the loop runs here: drive, watch
+  // the counters, and brake when the remaining angle is what the motor needs to stop
+  // (~55 ms of travel when braked, measured) plus one link round trip. Then repeat at
+  // fixPower until every motor is within tolDeg.
   async moveTo(ports, targets, power, gen = this.abortGen) {
-    for (let pass = 0; pass < 5; pass++) {
-      if (gen !== this.abortGen) throw new Aborted();
-      const now = await Promise.all(ports.map(p => this.pos(p)));
+    for (let pass = 0; ; pass++) {
+      const now = await this.read(ports, gen);
       const err = targets.map((t, i) => t - now[i].p);
+      this.log?.(`pass ${pass}: error ${err.join(', ')}°`);
       if (err.every(e => Math.abs(e) <= this.cfg.tolDeg)) return;
-      const pw = pass === 0 ? power : this.cfg.fixPower;
-      const raw = err.map((e, i) => e * this.sign(ports[i]));
-      const sync = pass === 0 && ports.length === 2 && Math.sign(raw[0]) === Math.sign(raw[1]) && Math.abs(Math.abs(raw[0]) - Math.abs(raw[1])) < 20;
-      const live = ports.filter((_, i) => Math.abs(err[i]) > this.cfg.tolDeg);
-      if (this.softLimit) await this.softMove(ports, targets, pw, gen);
-      else {
-        for (let i = 0; i < ports.length; i++) {
-          if (Math.abs(err[i]) <= this.cfg.tolDeg) continue;
-          await this.nxt.setOutput(ports[i], Math.sign(raw[i]) * pw, MODE_ON | MODE_BRAKE | MODE_REGULATED, sync ? REG_SYNC : REG_SPEED, 0, RUN_RUNNING, Math.abs(raw[i]));
-        }
-        const moved = await this.waitIdle(live, gen);
-        if (!moved && pass === 0) this.softLimit = true;   // firmware dropped the limited move
-      }
-    }
-    await this.nxt.brake();
-    const now = await Promise.all(ports.map(p => this.pos(p)));
-    throw new Error(`could not reach target (error ${targets.map((t, i) => Math.round(t - now[i].p)).join(', ')}°)`);
-  }
-
-  // Wait until the firmware reports the limited moves done, or nothing has moved for STALL_MS.
-  // Returns whether anything moved at all.
-  async waitIdle(ports, gen) {
-    const t0 = performance.now();
-    const start = await Promise.all(ports.map(p => this.pos(p)));
-    let last = start.map(s => s.p), lastChange = t0, moved = false;
-    for (;;) {
-      if (gen !== this.abortGen) throw new Aborted();
-      await sleep(POLL_MS);
-      const s = await Promise.all(ports.map(p => this.pos(p)));
-      const now = performance.now();
-      if (s.some((x, i) => Math.abs(x.p - last[i]) > 1)) { lastChange = now; moved = true; }
-      last = s.map(x => x.p);
-      if (s.every(x => x.run === RUN_IDLE)) return moved || s.some((x, i) => x.p !== start[i].p);
-      if (now - lastChange > STALL_MS) { await this.nxt.brake(); return moved; }
-      if (now - t0 > MOVE_TIMEOUT_MS) { await this.nxt.brake(); throw new Error('move timed out'); }
+      if (pass === 6) throw new Error(`could not reach target (error ${err.map(Math.round).join(', ')}°)`);
+      await this.approach(ports, targets, pass === 0 ? power : this.cfg.fixPower, gen);
+      await this.settle(ports, gen);
     }
   }
 
-  // Fallback without firmware tacho limits: run free and brake just before the target,
-  // leading by what the motor covers in one poll round trip.
-  async softMove(ports, targets, pw, gen) {
-    const dirs = [];
+  async approach(ports, targets, power, gen) {
+    let prev = await this.read(ports, gen);
+    const dir = targets.map((t, i) => Math.sign(t - prev[i].p));
+    const live = dir.map((d, i) => d !== 0 && Math.abs(targets[i] - prev[i].p) > this.cfg.tolDeg);
     for (let i = 0; i < ports.length; i++) {
-      const e = targets[i] - (await this.pos(ports[i])).p;
-      dirs[i] = Math.sign(e);
-      if (dirs[i]) await this.nxt.setOutput(ports[i], dirs[i] * this.sign(ports[i]) * pw, MODE_ON | MODE_BRAKE | MODE_REGULATED, REG_SPEED, 0, RUN_RUNNING, 0);
+      if (live[i]) await this.nxt.setOutput(ports[i], dir[i] * this.sign(ports[i]) * power, MODE_ON | MODE_BRAKE | MODE_REGULATED, REG_SPEED, 0, RUN_RUNNING, 0);
     }
-    const lead = 4 + pw * 0.5;
     const t0 = performance.now();
-    while (dirs.some(d => d)) {
-      if (gen !== this.abortGen) { await this.nxt.brake(); throw new Aborted(); }
+    let lastMove = t0;
+    const hist = [prev];   // speed over >= SPEED_WINDOW_MS: one 1° tick per 1 ms USB poll would read as 1000 °/s
+    while (live.some(Boolean)) {
+      await sleep(POLL_MS);
+      const cur = await this.read(ports, gen);
+      hist.push(cur);
+      while (hist.length > 2 && cur.t - hist[1].t >= SPEED_WINDOW_MS) hist.shift();
+      const ref = hist[0], dt = Math.max(cur.t - ref.t, 1) / 1000;
       for (let i = 0; i < ports.length; i++) {
-        if (!dirs[i]) continue;
-        const left = (targets[i] - (await this.pos(ports[i])).p) * dirs[i];
-        if (left <= lead) { await this.nxt.brake(ports[i]); dirs[i] = 0; }
+        if (!live[i]) continue;
+        const v = Math.abs(cur[i].p - ref[i].p) / dt;
+        const left = (targets[i] - cur[i].p) * dir[i];
+        if (left <= v * (BRAKE_S + 1.5 * this.rtt / 1000) + 1) { await this.nxt.brake(ports[i]); live[i] = false; }
       }
-      if (performance.now() - t0 > MOVE_TIMEOUT_MS) { await this.nxt.brake(); throw new Error('move timed out'); }
+      if (cur.some((c, i) => c.p !== prev[i].p)) lastMove = cur.t;
+      if (cur.t - lastMove > STALL_MS) { await this.nxt.brake(); throw new Error('motor stalled - is something blocking it?'); }
+      if (cur.t - t0 > MOVE_TIMEOUT_MS) { await this.nxt.brake(); throw new Error('move timed out'); }
+      prev = cur;
     }
-    await sleep(150);
+  }
+
+  // Wait until the counters stop changing (the "idle" run state is reported long before that).
+  async settle(ports, gen) {
+    let prev = await this.read(ports, gen);
+    const t0 = prev.t;
+    let still = t0;
+    while (prev.t - t0 < 3000) {
+      await sleep(25);
+      const cur = await this.read(ports, gen);
+      if (cur.some((c, i) => c.p !== prev[i].p)) still = cur.t;
+      else if (cur.t - still >= SETTLE_MS) return;
+      prev = cur;
+    }
+  }
+
+  // Positions of several ports, with a timestamp; keeps a running link round-trip estimate.
+  async read(ports, gen) {
+    if (gen !== undefined && gen !== this.abortGen) { await this.nxt.brake(); throw new Aborted(); }
+    const t = performance.now();
+    const r = [];
+    for (const p of ports) r.push(await this.pos(p));
+    const now = performance.now();
+    this.rtt = this.rtt * 0.8 + (now - t) / ports.length * 0.2;
+    r.t = now;
+    return r;
   }
 }
