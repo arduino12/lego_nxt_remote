@@ -28,6 +28,8 @@ const POS_PID = [64, 4, 96], POS_ACC = 10, CAL_SPEED = 30, CAL_ACC = 5;
 const A_TOL = 10;           // motor A: 10° = 0.5 cm is plenty, and its gear backlash makes 4° hunt
 const SYNC_LEAD = 90;       // B+C lockstep: how far the targets may run ahead of the slower motor
 const SYNC_STALL_MS = 4000; // ...and how long it may be held back before we give up
+const HUNT_MS = 1000;       // still swinging within 3x tolerance after this long counts as arrived
+const DRIFT_CHECK_MS = 400; // after braking the D-wheels, look again: a loaded wheel can be pushed off
 const STALL_MS = 1500, MOVE_TIMEOUT_MS = 30000, SETTLE_MS = 120, POLL_MS = 5, SPEED_WINDOW_MS = 20;
 const BRAKE_S = 0.055;      // braking stops a motor within ~55 ms of travel (measured at 25-80 %)
 const DEADMAN_S = 0.6;      // joystick drive runs out this long after the last command
@@ -208,6 +210,16 @@ export class Robot {
     }
     await this.waitTarget(ports, targets, gen);
     await this.release(ports);
+    // A braked motor can still be back-driven. If the robot's weight pushes a D-wheel off home,
+    // hold it there with the regulator instead (a small hunt beats a dragging wheel).
+    await sleep(DRIFT_CHECK_MS);
+    const after = await this.read(ports, gen);
+    for (let i = 0; i < ports.length; i++) {
+      if (Math.abs(targets[i] - after[i].p) <= this.tol(ports[i])) continue;
+      this.log?.(`port ${ports[i]} drifted to ${after[i].p - targets[i]}° after braking - holding it`);
+      await this.regulate(ports[i], speed, acc);
+      await this.target(ports[i], targets[i]);
+    }
   }
 
   // Send a logical-degree target to a regulated port (RotationCount -> TachoCount units).
@@ -231,7 +243,7 @@ export class Robot {
       Object.assign(st, { speed, acc });
       return;
     }
-    await this.nxt.posInit(port, { maxSpeed: speed, maxAcc: acc, pid: POS_PID });
+    await this.nxt.posInit(port, { maxSpeed: speed, maxAcc: acc, pid: this.cfg.posPid || POS_PID });
     const s = await this.pos(port);
     const offset = s.rotation - s.tacho;
     await this.nxt.posTarget(port, s.tacho);   // enter RegMode 4, holding here
@@ -239,18 +251,22 @@ export class Robot {
     this.pos_[port] = { offset, speed, acc };
   }
 
-  // Done when every port has stayed within tolDeg for SETTLE_MS. (Holding a target, the
-  // regulator dithers by a degree or so, so "counter unchanged" would rarely come true.)
+  // Done when every port has stayed within tolerance for SETTLE_MS, or within 3x tolerance for
+  // HUNT_MS. (Holding a target the regulator dithers, and under load with gear backlash it can
+  // swing ±10° indefinitely - so "counter unchanged" would rarely come true.)
   async waitTarget(ports, targets, gen) {
     const t0 = performance.now();
-    let prev = await this.read(ports, gen), inSince = null, lastMove = t0;
+    let prev = await this.read(ports, gen), inSince = null, nearSince = null, lastMove = t0;
     for (;;) {
       await sleep(POLL_MS);
       const cur = await this.read(ports, gen);
       if (cur.some((c, i) => c.p !== prev[i].p)) lastMove = cur.t;
       const ok = cur.every((c, i) => Math.abs(targets[i] - c.p) <= this.tol(ports[i]));
+      const near = cur.every((c, i) => Math.abs(targets[i] - c.p) <= 3 * this.tol(ports[i]));
       inSince = ok ? inSince ?? cur.t : null;
+      nearSince = near ? nearSince ?? cur.t : null;
       if (ok && cur.t - inSince >= SETTLE_MS) return;
+      if (near && cur.t - nearSince >= HUNT_MS) return;   // hunting in the backlash: close enough, brake it
       if (!ok && cur.t - lastMove > STALL_MS) { await this.stop(); throw new Error('motor stalled - is something blocking it?'); }
       if (cur.t - t0 > MOVE_TIMEOUT_MS) { await this.stop(); throw new Error('move timed out'); }
       prev = cur;
