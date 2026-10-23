@@ -4,7 +4,7 @@ import { Nxt, SerialTransport, UsbTransport, SPP_UUID, USB_FILTER, PORT_A, PORT_
 import { Robot, DEFAULTS, Aborted } from './motion.js';
 import { snakePath, pathStats } from './path.js';
 
-const APP_VERSION = '0.4.0';   // keep in step with index.html (?v=) and sw.js
+const APP_VERSION = '0.4.1';   // keep in step with index.html (?v=) and sw.js
 const KEEPALIVE_MS = 30000, JOY_MS = 150, LCD_MS = 200;
 const JOY_DEAD = 0.15, JOY_SIDE = 0.5, MIN_POWER = 15;
 

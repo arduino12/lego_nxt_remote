@@ -88,7 +88,7 @@ export class Robot {
       return true;
     }
     if (power === 0) {
-      if (this.drivePower !== 0) await this.nxt.brake(PORT_A);
+      if (this.drivePower !== 0) await this.nxt.halt(PORT_A);
       this.drivePower = 0;
       return true;
     }
@@ -167,7 +167,7 @@ export class Robot {
     this.abortGen++;
     this.drivePower = 0;
     this.pos_ = {};
-    await this.nxt.brake();
+    await this.nxt.halt();
   }
 
   // ------------------------------------------------------------ single moves
@@ -227,9 +227,9 @@ export class Robot {
     return this.nxt.posTarget(port, Math.round(logical * this.sign(port) - this.pos_[port].offset));
   }
 
-  // Brake and leave position regulation: a held target hunts back and forth in gear backlash.
+  // Stop and leave position regulation: a held target hunts back and forth in gear backlash.
   async release(ports) {
-    for (const p of ports) { await this.nxt.brake(p); delete this.pos_[p]; }
+    for (const p of ports) { await this.nxt.halt(p); delete this.pos_[p]; }
   }
 
   tol(port) { return port === PORT_A ? Math.max(this.cfg.tolDeg, A_TOL) : this.cfg.tolDeg; }
@@ -310,11 +310,11 @@ export class Robot {
         if (!live[i]) continue;
         const v = Math.abs(cur[i].p - ref[i].p) / dt;
         const left = (targets[i] - cur[i].p) * dir[i];
-        if (left <= v * (BRAKE_S + 1.5 * this.rtt / 1000) + 1) { await this.nxt.brake(ports[i]); live[i] = false; }
+        if (left <= v * (BRAKE_S + 1.5 * this.rtt / 1000) + 1) { await this.nxt.brake(ports[i]); live[i] = false; }   // speed mode: a plain brake is exact
       }
       if (cur.some((c, i) => c.p !== prev[i].p)) lastMove = cur.t;
-      if (cur.t - lastMove > STALL_MS) { await this.nxt.brake(); throw new Error('motor stalled - is something blocking it?'); }
-      if (cur.t - t0 > MOVE_TIMEOUT_MS) { await this.nxt.brake(); throw new Error('move timed out'); }
+      if (cur.t - lastMove > STALL_MS) { await this.nxt.halt(); throw new Error('motor stalled - is something blocking it?'); }
+      if (cur.t - t0 > MOVE_TIMEOUT_MS) { await this.nxt.halt(); throw new Error('move timed out'); }
       prev = cur;
     }
   }

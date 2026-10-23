@@ -258,6 +258,15 @@ export class Nxt {
     return this.setOutput(port, 0, MODE_ON | MODE_BRAKE | MODE_REGULATED, REG_POS, 0, RUN_RUNNING, tacho >>> 0, reply);
   }
 
+  // Reliable stop. Leaving position regulation, the firmware keeps the last PID output power
+  // latched: a plain brake (or regulated speed 0) left motor A running at ~300 °/s. Any
+  // non-zero speed command refreshes the output, so: 1 % for a moment, then brake.
+  async halt(port = PORT_ALL) {
+    await this.setOutput(port, 1, MODE_ON | MODE_BRAKE | MODE_REGULATED, REG_SPEED, 0, RUN_RUNNING, 0);
+    await new Promise(r => setTimeout(r, 30));
+    await this.brake(port);
+  }
+
   brake(port = PORT_ALL) { return this.setOutput(port, 0, MODE_ON | MODE_BRAKE, REG_IDLE, 0, RUN_RUNNING, 0); }
   float(port = PORT_ALL) { return this.setOutput(port, 0, 0, REG_IDLE, 0, RUN_IDLE, 0); }
 }

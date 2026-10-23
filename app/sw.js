@@ -1,7 +1,7 @@
 // Network-first app shell (same scheme as baby_shaker_v1): every request revalidates
 // with the server, so page, CSS and modules always come from one release. The cache
 // is only the offline fallback.
-const CACHE = 'nxt-remote-0.4.0';
+const CACHE = 'nxt-remote-0.4.1';
 const SHELL = ['./', 'index.html', 'app.js', 'nxt.js', 'motion.js', 'path.js', 'style.css', 'manifest.json', 'icon.svg'];
 
 self.addEventListener('install', e => {
