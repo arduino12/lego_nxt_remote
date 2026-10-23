@@ -4,7 +4,7 @@
 
 export const PORT_A = 0, PORT_B = 1, PORT_C = 2, PORT_ALL = 0xFF;
 export const MODE_ON = 0x01, MODE_BRAKE = 0x02, MODE_REGULATED = 0x04;
-export const REG_IDLE = 0, REG_SPEED = 1, REG_SYNC = 2;
+export const REG_IDLE = 0, REG_SPEED = 1, REG_SYNC = 2, REG_POS = 4;   // REG_POS: NXT Improved Firmware only
 export const RUN_IDLE = 0x00, RUN_RAMPUP = 0x10, RUN_RUNNING = 0x20, RUN_RAMPDOWN = 0x40;
 export const BTN_LEFT = 1, BTN_ENTER = 2, BTN_RIGHT = 3, BTN_EXIT = 4;
 export const BT_VISIBLE = 0x01, BT_CONNECTED = 0x02, BT_OFF = 0x04, BT_PIN_REQUEST = 0x80;
@@ -13,7 +13,11 @@ export const USB_FILTER = { vendorId: 0x0694, productId: 0x0002 };
 export const SCREEN_W = 100, SCREEN_H = 64;
 
 const DIRECT = 0x00, SYSTEM = 0x01, NO_REPLY = 0x80, REPLY = 0x02;
-const MOD_DISPLAY = 0x000A0001, MOD_UI = 0x000C0001;
+const MOD_OUTPUT = 0x00020001, MOD_DISPLAY = 0x000A0001, MOD_UI = 0x000C0001;
+// Output IOMAP: 32 bytes per port. Flags at 18, RegP/I/D at 22-24, MaxSpeed/MaxAcceleration at 30-31
+// (the last two exist in the NXT Improved Firmware, src/c_output.iom).
+const OUT_FLAGS = 18, OUT_PID = 22, OUT_MAX = 30;
+const UF_RESET_COUNT = 0x08, UF_PID_VALUES = 0x10;
 const DISP_FLAGS = 117, DISP_NORMAL = 119, DISP_POPUP = 919, DISP_F_POPUP = 0x08;
 const UI_FLAGS = 26, UI_BUTTON = 28;
 const SCREEN_BYTES = 800, IOMAP_CHUNK = 50;   // a reply must fit one 64-byte telegram
@@ -228,6 +232,30 @@ export class Nxt {
   async uiState() {
     const b = await this.readIOMap(MOD_UI, UI_FLAGS, 7);
     return { state: b[1], runState: b[3], bt: b[5], usb: b[6] };
+  }
+
+  // ---- absolute position regulation (NXT Improved Firmware, RegMode 4) ----
+  // The brick PID-regulates the motor to a target in TachoCount units at 1 kHz, following a
+  // speed/acceleration profile - no link latency in the loop. posInit zeroes TachoCount
+  // (which also zeroes the regulator's target, so nothing jumps) and sets the profile.
+  async hasPosRegulation() {
+    const b = await this.readIOMap(MOD_OUTPUT, OUT_MAX, 2);   // LEGO 1.29 keeps these spare bytes at 0
+    return b[0] !== 0 || b[1] !== 0;
+  }
+  async posInit(port, { maxSpeed, maxAcc, pid }) {
+    const base = port * 32;
+    if (pid) await this.writeIOMap(MOD_OUTPUT, base + OUT_PID, pid);
+    await this.writeIOMap(MOD_OUTPUT, base + OUT_MAX, [maxSpeed & 0xFF, maxAcc & 0xFF]);
+    await this.writeIOMap(MOD_OUTPUT, base + OUT_FLAGS, [UF_RESET_COUNT | UF_PID_VALUES]);
+  }
+  async posProfile(port, maxSpeed, maxAcc) {
+    const base = port * 32;
+    await this.writeIOMap(MOD_OUTPUT, base + OUT_MAX, [maxSpeed & 0xFF, maxAcc & 0xFF]);
+    await this.writeIOMap(MOD_OUTPUT, base + OUT_FLAGS, [UF_PID_VALUES]);
+  }
+  // Target in TachoCount degrees (signed). Travels in the TachoLimit field.
+  posTarget(port, tacho, reply = false) {
+    return this.setOutput(port, 0, MODE_ON | MODE_BRAKE | MODE_REGULATED, REG_POS, 0, RUN_RUNNING, tacho >>> 0, reply);
   }
 
   brake(port = PORT_ALL) { return this.setOutput(port, 0, MODE_ON | MODE_BRAKE, REG_IDLE, 0, RUN_RUNNING, 0); }

@@ -4,7 +4,7 @@ import { Nxt, SerialTransport, UsbTransport, SPP_UUID, USB_FILTER, PORT_A, PORT_
 import { Robot, DEFAULTS, Aborted } from './motion.js';
 import { snakePath, pathStats } from './path.js';
 
-const APP_VERSION = '0.2.0';   // keep in step with index.html (?v=) and sw.js
+const APP_VERSION = '0.3.0';   // keep in step with index.html (?v=) and sw.js
 const KEEPALIVE_MS = 30000, JOY_MS = 150, LCD_MS = 200;
 const JOY_DEAD = 0.15, JOY_SIDE = 0.5, MIN_POWER = 15;
 
@@ -164,7 +164,10 @@ async function attach(tr) {
   nxt = new Nxt(tr);
   robot = new Robot(nxt, cfg);
   robot.onPos = showPos;
-  brickInfo = await nxt.deviceInfo();
+  // The first request after opening a Bluetooth port can be lost while the link comes up.
+  for (let i = 0; ; i++) {
+    try { brickInfo = await nxt.deviceInfo(); break; } catch (e) { if (i === 2) throw e; }
+  }
   const fw = await nxt.firmware();
   batteryMv = await nxt.battery();
   tr.onclose = onClosed;
@@ -174,7 +177,7 @@ async function attach(tr) {
   $('stName').textContent = brickInfo.name;
   showBattery();
   $('infoFw').textContent = `${fw.firmware} (protocol ${fw.protocol})`;
-  robot.fwLimits = parseFloat(fw.firmware) >= 1.2;   // 1.01's tacho limits are off by ±25°
+  robot.posReg = await nxt.hasPosRegulation();   // NXT Improved Firmware: the brick positions motors itself
   $('infoAddr').textContent = brickInfo.btAddr;
   $('nameInput').value = brickInfo.name;
   clearInterval(keepTimer);
@@ -506,7 +509,10 @@ $('renameBtn').addEventListener('click', () => act(async () => {
   const name = $('nameInput').value.trim();
   if (!name) return;
   await nxt.setName(name);
-  brickInfo = await nxt.deviceInfo();
+  // The first request after opening a Bluetooth port can be lost while the link comes up.
+  for (let i = 0; ; i++) {
+    try { brickInfo = await nxt.deviceInfo(); break; } catch (e) { if (i === 2) throw e; }
+  }
   $('stName').textContent = brickInfo.name;
   setHint('hintSaved');
 }));

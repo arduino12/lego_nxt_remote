@@ -20,7 +20,7 @@ import sys
 import time
 
 DIRECT, SYSTEM, NO_REPLY = 0x00, 0x01, 0x80
-MOD_DISPLAY, MOD_UI = 0x000A0001, 0x000C0001
+MOD_OUTPUT, MOD_DISPLAY, MOD_UI = 0x00020001, 0x000A0001, 0x000C0001
 DISP_FLAGS, DISP_NORMAL, DISP_POPUP = 117, 119, 919
 UI_BUTTON, UI_BT_STATE = 28, 31
 BUTTONS = {'left': 1, 'enter': 2, 'right': 3, 'exit': 4}
@@ -222,6 +222,14 @@ def run(nxt, cmd, args, out):
                 nxt.req(SYSTEM, 0x83, bytes([handle]) + data[i:i + 61])   # WRITE
             nxt.req(SYSTEM, 0x84, bytes([handle]))
             out(f'restored {name} ({len(data)} bytes)')
+    elif cmd == 'rm':   # rm NAME... (names may contain spaces: separate them with '|')
+        for name in ' '.join(args).split('|'):
+            name = name.strip()
+            try:
+                nxt.req(SYSTEM, 0x85, name.encode().ljust(20, b'\0'))   # DELETE
+                out(f'deleted {name}')
+            except IOError as e:
+                out(f'could not delete {name}: {e}')
     elif cmd == 'files':   # files [pattern] : list the brick's flash file system
         pat = (args[0] if args else '*.*').encode()[:19].ljust(20, b'\0')
         try:
@@ -237,6 +245,32 @@ def run(nxt, cmd, args, out):
             nxt.req(SYSTEM, 0x84, bytes([handle]))   # CLOSE
         except IOError as e:
             out(f'no (more) files: {e}')
+    elif cmd == 'pos':
+        # pos B 360 [maxspeed] [maxaccel] [seconds] : NXT Improved Firmware absolute position
+        # regulation (RegMode 4). Zero the internal count first (UPDATE_RESET_COUNT also zeroes
+        # the regulator's target), optionally set the speed profile, then send the target.
+        port, deg = PORTS[args[0].upper()], int(args[1])
+        maxspeed = int(args[2]) if len(args) > 2 else 0
+        maxacc = int(args[3]) if len(args) > 3 else 0
+        secs = float(args[4]) if len(args) > 4 else 1.5
+        base = port * 32
+        if len(args) > 7:   # P I D (firmware defaults 96 32 32)
+            nxt.write_iomap(MOD_OUTPUT, base + 22, [int(args[5]), int(args[6]), int(args[7])])
+        nxt.write_iomap(MOD_OUTPUT, base + 30, [maxspeed & 0xFF, maxacc & 0xFF])   # MaxSpeed, MaxAcceleration
+        nxt.write_iomap(MOD_OUTPUT, base + 18, [0x08 | 0x10])                       # Flags: RESET_COUNT | PID_VALUES
+        time.sleep(0.02)
+        s0 = nxt.get_output(port)
+        out(f'before: {s0}')
+        payload = struct.pack('<BbBBbBi', port, 0, MODE_ON | MODE_BRAKE | MODE_REG, 4, 0, RUN_RUNNING, deg)
+        t0 = time.time()
+        for _ in range(2):   # the first one may land before the regulation mode switch
+            nxt.req(DIRECT, 0x04, payload)
+        while time.time() - t0 < secs:
+            s = nxt.get_output(port)
+            out(f'{(time.time() - t0) * 1000:6.0f} ms  run 0x{s["run"]:02x}  tacho {s["tacho"]:+5d}  rot {s["rotation"] - s0["rotation"]:+5d}')
+            time.sleep(0.02)
+    elif cmd == 'ior':   # ior MODULE_HEX OFFSET N
+        out(nxt.read_iomap(int(args[0], 16), int(args[1]), int(args[2])).hex(' '))
     elif cmd == 'trace':
         # trace B 360 [power] [seconds] : start a tacho-limited move and sample the motor state over time
         port, deg = PORTS[args[0].upper()], int(args[1])

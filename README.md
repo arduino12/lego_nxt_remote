@@ -1,11 +1,17 @@
 # NXT Remote
 
 Phone remote for a LEGO MINDSTORMS NXT robot whose LCD is dead. It's a web page (PWA) that talks to the brick
-over Bluetooth from **Chrome on Android**. The NXT keeps its stock LEGO firmware: the page sends LEGO *direct
-commands*, so nothing has to be installed or started on the brick and no menu is needed at power-up.
+over Bluetooth from **Chrome on Android**. The page sends LEGO *direct commands*, so no program has to be
+installed or started on the brick and no menu is needed at power-up.
+
+The brick runs the **NXT Improved Firmware 1.29.8** (Debian package `nxt-firmware`, LEGO 1.29 plus absolute
+position regulation). The brick drives B/C and A to absolute targets itself (1 kHz PID), so Bluetooth latency
+doesn't affect accuracy. Measured over Bluetooth: side steps land within 0–1° of home in about 2.5 s, and
+10 cm moves land within 3°. On plain LEGO firmware the app falls back to braking the motors itself.
 
 - **Drive tab**: a joystick. Up/down runs motor A (forward/back). Left/right does one B+C turn per step, which moves the robot 5 cm sideways.
-- **Path tab**: draw a route with your finger. It's snapped to forward/back runs (1 cm resolution) and whole 5 cm side steps, then driven with closed-loop position control.
+- **Path tab**: snake grid. Set the number of rows, row length (cm), and B+C turns between rows. The robot drives
+  a row, shifts sideways, drives back, and so on.
 - **Brick tab**:
   - The brick's screen, read from its display memory, with the 4 front-panel buttons as virtual buttons.
   - Side-wheel home setup and calibration.
@@ -50,5 +56,7 @@ python tools/nxt_probe.py --usb info  # or --port COMx (the brick's outgoing Blu
 
 - `app/nxt.js`: direct-command protocol (BT length-prefixed frames / USB bulk), IO-map screen and buttons.
 - `app/motion.js`: absolute-target motor control, B/C home interlock, joystick deadman, soft-limit fallback.
-- `app/path.js`: stroke → move list.
+- `app/path.js`: snake grid → move list.
+- `tools/nxt_flash.py`: firmware flasher over SAM-BA (port of libnxt fwflash; WinUSB or the CDC COM port).
+- `tools/bt_pair.py`: pair Windows with the NXT (PIN 1234).
 - `app/app.js`: UI, Hebrew/English.

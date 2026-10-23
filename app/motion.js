@@ -3,24 +3,31 @@
 // wheels; one turn moves the robot one lane sideways, and between turns both must rest at
 // "home" (RotationCount a multiple of 360, flat side down) or they drag on the floor.
 // All targets are absolute RotationCount values, so position errors never accumulate.
-// Moves are single shots; the D-wheels are only corrected on request (calibrate()).
-import { PORT_A, PORT_B, PORT_C, MODE_ON, MODE_BRAKE, MODE_REGULATED, REG_SPEED, REG_SYNC, RUN_RUNNING, RUN_IDLE } from './nxt.js';
+//
+// With the NXT Improved Firmware the brick regulates position itself (RegMode 4, 1 kHz PID
+// with a speed/acceleration profile): every move is a target sent once, then the motor
+// holds it - no Bluetooth latency in the loop, and the D-wheels stay flat while A drives.
+// Without it (LEGO firmware) a software loop here brakes the motors on target instead.
+import { PORT_A, PORT_B, PORT_C, MODE_ON, MODE_BRAKE, MODE_REGULATED, REG_SPEED, RUN_RUNNING } from './nxt.js';
 
 export const DEFAULTS = {
   invA: false, invB: false, invC: false, invSide: false,
-  drivePower: 75,      // joystick full scale and path driving, %
-  sidePower: 60,       // side steps, %
-  fixPower: 15,        // correction passes, % (regulated 15 % lands within ~1° - measured)
+  drivePower: 75,      // joystick full scale and path rows (max speed), %
+  sidePower: 50,       // side steps (max speed), %
+  fixPower: 15,        // software-loop corrections, %
   wheelCm: 6,          // drive wheel diameter; motor A turns the wheels 1:1
   stepCm: 5,           // sideways travel per B+C turn
   tolDeg: 4,           // close enough to a target / to home
-  deadman: true,       // joystick drive runs in tacho-limited chunks that run out if the link drops
+  deadman: true,       // joystick drive stops by itself if the link drops
 };
 
-const STALL_MS = 800, MOVE_TIMEOUT_MS = 20000, SETTLE_MS = 80, POLL_MS = 5, SPEED_WINDOW_MS = 20;
+// Position regulation tuning, measured on this robot: PID 64/4/96 with acceleration 10
+// lands within ±1° and overshoots ~9° on a full turn (firmware default 96/32/32: 24°).
+const POS_PID = [64, 4, 96], POS_ACC = 10, CAL_SPEED = 30, CAL_ACC = 5;
+const STALL_MS = 1500, MOVE_TIMEOUT_MS = 30000, SETTLE_MS = 120, POLL_MS = 5, SPEED_WINDOW_MS = 20;
 const BRAKE_S = 0.055;      // braking stops a motor within ~55 ms of travel (measured at 25-80 %)
-const DEADMAN_S = 0.6;      // joystick drive keeps going this long after the last command
-const MIN_LIMIT = 250;      // firmware 1.01 ignores tacho limits much below ~110°
+const DEADMAN_S = 0.6;      // joystick drive runs out this long after the last command
+const MIN_LIMIT = 250;      // LEGO firmware ignores tacho limits much below ~110°
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const mod360 = d => ((d % 360) + 360) % 360;
 
@@ -30,13 +37,14 @@ export class Robot {
   constructor(nxt, cfg) {
     this.nxt = nxt;
     this.cfg = cfg;
+    this.posReg = false;     // brick has absolute position regulation (set after connecting)
+    this.pos_ = {};          // port -> { offset: RotationCount - TachoCount, speed, acc } while regulating
     this.aTarget = null;     // absolute A target during a path run
     this.rtt = 30;           // ms per request, measured as we go
     this.abortGen = 0;
     this.drivePower = 0;
     this.sideBusy = false;
     this.onPos = null;       // (port, logicalDeg) for the UI
-    this.fwLimits = true;    // firmware tacho limits are precise (LEGO 1.2x+); 1.01's are not
   }
 
   get cmPerDegA() { return Math.PI * this.cfg.wheelCm / 360; }
@@ -47,21 +55,35 @@ export class Robot {
     const s = await this.nxt.getOutput(port);
     const p = s.rotation * this.sign(port);
     this.onPos?.(port, p);
-    return { p, run: s.run, power: s.power };
+    return { p, run: s.run, rotation: s.rotation, tacho: s.tacho };
   }
 
   // ------------------------------------------------------------ joystick
-  // power -100..100 on A. Re-send every ~150 ms while held: with the deadman each
-  // command only covers ~0.5 s of travel, so a dropped phone or link stops the robot.
+  // power -100..100 on A, re-sent every ~150 ms while the stick is held. Deadman: with
+  // position regulation the target is only DEADMAN_S of travel ahead of the motor, so if
+  // the link drops the robot rolls to the last target and stops; on LEGO firmware each
+  // command is a tacho-limited chunk instead.
   async drive(power) {
     if (this.sideBusy) return false;
     power = Math.round(power);
+    const dir = Math.sign(power) * this.sign(PORT_A);
+    if (this.posReg && this.cfg.deadman) {
+      if (power === 0 && this.drivePower === 0) return true;
+      const st = this.pos_[PORT_A];
+      if (!st || Math.abs(st.speed - Math.abs(power)) >= 5) await this.regulate(PORT_A, Math.max(Math.abs(power), 10), POS_ACC * 2);
+      const s = await this.pos(PORT_A);
+      const lead = power === 0 ? 0 : Math.max(60, Math.abs(power) * 9 * DEADMAN_S);   // ~9 °/s per %
+      await this.nxt.posTarget(PORT_A, s.tacho + dir * lead);
+      this.drivePower = power;
+      return true;
+    }
     if (power === 0) {
       if (this.drivePower !== 0) await this.nxt.brake(PORT_A);
       this.drivePower = 0;
       return true;
     }
-    const limit = this.cfg.deadman ? Math.max(MIN_LIMIT, Math.abs(power) * 9 * DEADMAN_S) : 0;   // ~9 °/s per %
+    delete this.pos_[PORT_A];
+    const limit = this.cfg.deadman ? Math.max(MIN_LIMIT, Math.abs(power) * 9 * DEADMAN_S) : 0;
     await this.nxt.setOutput(PORT_A, power * this.sign(PORT_A), MODE_ON | MODE_BRAKE | MODE_REGULATED, REG_SPEED, 0, RUN_RUNNING, limit);
     this.drivePower = power;
     return true;
@@ -76,7 +98,7 @@ export class Robot {
       const d = (this.cfg.invSide ? -n : n) * 360;
       const [b, c] = await Promise.all([this.pos(PORT_B), this.pos(PORT_C)]);
       const tb = Math.round(b.p / 360) * 360 + d, tc = Math.round(c.p / 360) * 360 + d;
-      await this.moveOnce([PORT_B, PORT_C], [tb, tc], this.cfg.sidePower, gen);
+      await this.moveOnce([PORT_B, PORT_C], [tb, tc], this.cfg.sidePower, POS_ACC, gen);
     } finally { this.sideBusy = false; }
   }
 
@@ -86,22 +108,28 @@ export class Robot {
     return off(b.p) <= this.cfg.tolDeg && off(c.p) <= this.cfg.tolDeg;
   }
 
-  // The "calibrate D wheels" button: turn B and C to the nearest home with correction passes.
+  // The "calibrate D wheels" button: turn B and C slowly to the nearest home.
   async calibrate(gen = this.abortGen) {
     this.sideBusy = true;
     try {
       const [b, c] = await Promise.all([this.pos(PORT_B), this.pos(PORT_C)]);
-      await this.moveTo([PORT_B, PORT_C], [Math.round(b.p / 360) * 360, Math.round(c.p / 360) * 360], this.cfg.fixPower * 2, gen);
+      const targets = [Math.round(b.p / 360) * 360, Math.round(c.p / 360) * 360];
+      if (this.posReg) await this.moveOnce([PORT_B, PORT_C], targets, CAL_SPEED, CAL_ACC, gen);
+      else await this.moveTo([PORT_B, PORT_C], targets, this.cfg.fixPower * 2, gen);
     } finally { this.sideBusy = false; }
   }
 
   // Calibration: nudge one side motor, then call setHome() when the flat sides face down.
   async jog(port, deg) {
-    await this.moveTo([port], [(await this.pos(port)).p + deg], this.cfg.fixPower);
+    const target = (await this.pos(port)).p + deg;
+    if (this.posReg) await this.moveOnce([port], [target], CAL_SPEED, CAL_ACC);
+    else await this.moveTo([port], [target], this.cfg.fixPower);
   }
   async setHome() {
     await this.nxt.resetMotorPosition(PORT_B, false);
     await this.nxt.resetMotorPosition(PORT_C, false);
+    delete this.pos_[PORT_B];   // RotationCount moved under the regulator's offset
+    delete this.pos_[PORT_C];
     await Promise.all([this.pos(PORT_B), this.pos(PORT_C)]);
   }
 
@@ -109,7 +137,7 @@ export class Robot {
   async forward(cm, gen = this.abortGen) {
     if (this.aTarget === null) this.aTarget = (await this.pos(PORT_A)).p;
     this.aTarget += Math.round(cm / this.cmPerDegA);
-    await this.moveOnce([PORT_A], [this.aTarget], this.cfg.drivePower, gen);
+    await this.moveOnce([PORT_A], [this.aTarget], this.cfg.drivePower, POS_ACC, gen);
   }
 
   async runPath(moves, onStep) {
@@ -123,48 +151,68 @@ export class Robot {
     onStep?.(moves.length);
   }
 
+  // Braking ends position regulation too; the next move sets it up again.
   async stop() {
     this.abortGen++;
     this.drivePower = 0;
+    this.pos_ = {};
     await this.nxt.brake();
   }
 
   // ------------------------------------------------------------ single moves
-  // One move to an absolute target, no correction pass. With LEGO 1.2x+ firmware the brick
-  // runs the tacho limit itself and brakes on target (B+C synchronised when they turn
-  // together); on 1.01, whose limits are off by ±25°, the loop below brakes it instead.
-  async moveOnce(ports, targets, power, gen = this.abortGen) {
-    if (!this.fwLimits) { await this.approach(ports, targets, power, gen); await this.settle(ports, gen); return; }
-    const now = await this.read(ports, gen);
-    const raw = targets.map((t, i) => (t - now[i].p) * this.sign(ports[i]));
-    const live = raw.map(r => Math.abs(r) > this.cfg.tolDeg);
-    if (!live.some(Boolean)) return;
-    const sync = ports.length === 2 && live[0] && live[1] && Math.sign(raw[0]) === Math.sign(raw[1]) && Math.abs(Math.abs(raw[0]) - Math.abs(raw[1])) < 20;
-    for (let i = 0; i < ports.length; i++) {
-      if (!live[i]) continue;
-      await this.nxt.setOutput(ports[i], Math.sign(raw[i]) * power, MODE_ON | MODE_BRAKE | MODE_REGULATED, sync ? REG_SYNC : REG_SPEED, 0, RUN_RUNNING, Math.abs(raw[i]));
+  async moveOnce(ports, targets, speed, acc, gen = this.abortGen) {
+    if (!this.posReg) { await this.approach(ports, targets, speed, gen); await this.settle(ports, gen); return; }
+    for (const p of ports) {
+      const st = this.pos_[p];
+      if (!st || st.speed !== speed || st.acc !== acc) await this.regulate(p, speed, acc);
     }
-    // Done when the brick reports idle and the counters have stopped; stall = no motion for STALL_MS.
+    for (let i = 0; i < ports.length; i++) {
+      const raw = targets[i] * this.sign(ports[i]);   // RotationCount units
+      await this.nxt.posTarget(ports[i], raw - this.pos_[ports[i]].offset);
+    }
+    await this.waitTarget(ports, targets, gen);
+  }
+
+  // Start (or re-profile) position regulation on a port. A fresh start zeroes TachoCount,
+  // which also zeroes the regulator's own target - so it holds where the motor is now.
+  async regulate(port, speed, acc) {
+    const st = this.pos_[port];
+    if (st) {
+      await this.nxt.posProfile(port, speed, acc);
+      Object.assign(st, { speed, acc });
+      return;
+    }
+    await this.nxt.posInit(port, { maxSpeed: speed, maxAcc: acc, pid: POS_PID });
+    const s = await this.pos(port);
+    const offset = s.rotation - s.tacho;
+    await this.nxt.posTarget(port, s.tacho);   // enter RegMode 4, holding here
+    await this.nxt.posTarget(port, s.tacho);   // the first may land before the mode switch
+    this.pos_[port] = { offset, speed, acc };
+  }
+
+  // Done when every port has stayed within tolDeg for SETTLE_MS. (Holding a target, the
+  // regulator dithers by a degree or so, so "counter unchanged" would rarely come true.)
+  async waitTarget(ports, targets, gen) {
     const t0 = performance.now();
-    let prev = now, lastMove = t0, quiet = t0;
+    let prev = await this.read(ports, gen), inSince = null, lastMove = t0;
     for (;;) {
       await sleep(POLL_MS);
       const cur = await this.read(ports, gen);
-      const moved = cur.some((c, i) => c.p !== prev[i].p);
-      if (moved) lastMove = quiet = cur.t;
-      if (cur.every(c => c.run === RUN_IDLE) && cur.t - quiet >= SETTLE_MS) return;
-      if (!moved && cur.t - lastMove > STALL_MS && cur.some(c => c.run !== RUN_IDLE)) { await this.nxt.brake(); throw new Error('motor stalled - is something blocking it?'); }
-      if (cur.t - t0 > MOVE_TIMEOUT_MS) { await this.nxt.brake(); throw new Error('move timed out'); }
+      if (cur.some((c, i) => c.p !== prev[i].p)) lastMove = cur.t;
+      const ok = cur.every((c, i) => Math.abs(targets[i] - c.p) <= this.cfg.tolDeg);
+      inSince = ok ? inSince ?? cur.t : null;
+      if (ok && cur.t - inSince >= SETTLE_MS) return;
+      if (!ok && cur.t - lastMove > STALL_MS) { await this.stop(); throw new Error('motor stalled - is something blocking it?'); }
+      if (cur.t - t0 > MOVE_TIMEOUT_MS) { await this.stop(); throw new Error('move timed out'); }
       prev = cur;
     }
   }
 
-  // ------------------------------------------------------------ closed loop
-  // The stock firmware's own tacho limits can't position precisely (1.01 cuts power ~110°
-  // early, lands ±25° off and ignores moves under ~90°), so the loop runs here: drive, watch
-  // the counters, and brake when the remaining angle is what the motor needs to stop
-  // (~55 ms of travel when braked, measured) plus one link round trip. Then repeat at
-  // fixPower until every motor is within tolDeg.
+  // ------------------------------------------------------------ software loop (LEGO firmware)
+  // LEGO firmware tacho limits can't position precisely (1.01 cuts power ~110° early and
+  // lands ±25° off; 1.29 coasts past the limit), so: drive, watch the counters, and brake when
+  // the remaining angle is what the motor needs to stop (~55 ms of travel) plus one link
+  // round trip. moveTo() then repeats at fixPower until every motor is within tolDeg.
   async moveTo(ports, targets, power, gen = this.abortGen) {
     for (let pass = 0; ; pass++) {
       const now = await this.read(ports, gen);
@@ -222,7 +270,7 @@ export class Robot {
 
   // Positions of several ports, with a timestamp; keeps a running link round-trip estimate.
   async read(ports, gen) {
-    if (gen !== undefined && gen !== this.abortGen) { await this.nxt.brake(); throw new Aborted(); }
+    if (gen !== undefined && gen !== this.abortGen) { await this.stop(); throw new Aborted(); }
     const t = performance.now();
     const r = [];
     for (const p of ports) r.push(await this.pos(p));
