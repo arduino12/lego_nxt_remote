@@ -125,3 +125,14 @@ button.stop {
 }
 
 footer { color: var(--muted); font-size: .75rem; text-align: center; padding: 16px; }
+
+.form { display: grid; gap: 10px; }
+.form label { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: .95rem; }
+.form input { width: 110px; text-align: center; }
+input.narrow { width: 110px; text-align: center; }
+.seg { display: flex; gap: 0; }
+.seg button { min-width: 54px; border-radius: 0; }
+.seg button:first-child { border-radius: 10px 0 0 10px; }
+.seg button:last-child { border-radius: 0 10px 10px 0; }
+.seg button.on { background: var(--accent); color: var(--accent-ink); }
+canvas.path { touch-action: auto; }

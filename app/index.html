@@ -7,7 +7,7 @@
   <title>NXT Remote</title>
   <link rel="manifest" href="manifest.json">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="style.css?v=0.1.0">
+  <link rel="stylesheet" href="style.css?v=0.2.0">
 </head>
 <body>
   <header>
@@ -50,20 +50,24 @@
         </div>
         <label class="slider"><span data-t="drivePower"></span> <b id="drivePowerVal"></b>
           <input type="range" id="drivePower" min="20" max="100" step="5"></label>
+        <button id="calibBtn" class="ghost" data-t="calibD"></button>
       </div>
     </section>
 
     <section id="tab-path" class="tab" hidden>
       <div class="card">
+        <h2 data-t="snakeTitle"></h2>
+        <div class="form">
+          <label><span data-t="rows"></span><input id="rows" type="number" inputmode="numeric" min="1" max="99" step="1"></label>
+          <label><span data-t="rowCm"></span><input id="rowCm" type="number" inputmode="decimal" min="1" step="1"></label>
+          <label><span data-t="sideTurns"></span><input id="sideTurns" type="number" inputmode="numeric" min="0" max="99" step="1"></label>
+          <label><span data-t="sideDir"></span>
+            <span class="seg ltr"><button id="dirL" data-dir="-1">◀</button><button id="dirR" data-dir="1">▶</button></span></label>
+        </div>
+        <p id="rowInfo" class="hint"></p>
         <canvas id="pathCanvas" class="path"></canvas>
         <p id="pathInfo" class="hint center"></p>
-        <div class="row">
-          <button id="undoBtn" class="ghost" data-t="undo"></button>
-          <button id="clearBtn" class="ghost" data-t="clear"></button>
-          <button id="runBtn" class="primary grow" data-t="run"></button>
-        </div>
-        <label class="field"><span data-t="area"></span>
-          <select id="area"><option value="100">1 × 1 m</option><option value="200">2 × 2 m</option><option value="300">3 × 3 m</option><option value="500">5 × 5 m</option></select></label>
+        <button id="runBtn" class="primary" data-t="run"></button>
       </div>
     </section>
 
@@ -96,12 +100,8 @@
 
       <div class="card">
         <h2 data-t="calTitle"></h2>
-        <p class="hint" data-t="calHint"></p>
-        <div class="row">
-          <button id="calDriveBtn" class="ghost grow" data-t="calDrive"></button>
-          <input id="calCm" type="number" inputmode="decimal" min="1" step="0.5" class="grow">
-          <button id="calSaveBtn" class="primary" data-t="save"></button>
-        </div>
+        <label class="field"><span data-t="wheelCm"></span>
+          <input id="wheelCm" type="number" inputmode="decimal" min="1" step="0.1" class="narrow"></label>
         <p id="calInfo" class="hint"></p>
         <label class="check"><input type="checkbox" data-cfg="invA"> <span data-t="invA"></span></label>
         <label class="check"><input type="checkbox" data-cfg="invSide"> <span data-t="invSide"></span></label>
@@ -130,6 +130,6 @@
   <button id="stopBtn" class="stop" data-t="stop"></button>
   <footer id="footer"></footer>
 
-  <script type="module" src="app.js?v=0.1.0"></script>
+  <script type="module" src="app.js?v=0.2.0"></script>
 </body>
 </html>

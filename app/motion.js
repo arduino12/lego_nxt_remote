@@ -3,14 +3,15 @@
 // wheels; one turn moves the robot one lane sideways, and between turns both must rest at
 // "home" (RotationCount a multiple of 360, flat side down) or they drag on the floor.
 // All targets are absolute RotationCount values, so position errors never accumulate.
-import { PORT_A, PORT_B, PORT_C, MODE_ON, MODE_BRAKE, MODE_REGULATED, REG_SPEED, RUN_RUNNING } from './nxt.js';
+// Moves are single shots; the D-wheels are only corrected on request (calibrate()).
+import { PORT_A, PORT_B, PORT_C, MODE_ON, MODE_BRAKE, MODE_REGULATED, REG_SPEED, REG_SYNC, RUN_RUNNING, RUN_IDLE } from './nxt.js';
 
 export const DEFAULTS = {
   invA: false, invB: false, invC: false, invSide: false,
   drivePower: 75,      // joystick full scale and path driving, %
   sidePower: 60,       // side steps, %
   fixPower: 15,        // correction passes, % (regulated 15 % lands within ~1° - measured)
-  cmPerDegA: 0.0489,   // 5.6 cm wheel on the motor axle; calibrate in the Brick tab
+  wheelCm: 6,          // drive wheel diameter; motor A turns the wheels 1:1
   stepCm: 5,           // sideways travel per B+C turn
   tolDeg: 4,           // close enough to a target / to home
   deadman: true,       // joystick drive runs in tacho-limited chunks that run out if the link drops
@@ -35,7 +36,10 @@ export class Robot {
     this.drivePower = 0;
     this.sideBusy = false;
     this.onPos = null;       // (port, logicalDeg) for the UI
+    this.fwLimits = true;    // firmware tacho limits are precise (LEGO 1.2x+); 1.01's are not
   }
+
+  get cmPerDegA() { return Math.PI * this.cfg.wheelCm / 360; }
 
   sign(port) { return (port === PORT_A ? this.cfg.invA : port === PORT_B ? this.cfg.invB : this.cfg.invC) ? -1 : 1; }
 
@@ -57,7 +61,6 @@ export class Robot {
       this.drivePower = 0;
       return true;
     }
-    if (this.drivePower === 0 && !(await this.isHome())) await this.goHome();
     const limit = this.cfg.deadman ? Math.max(MIN_LIMIT, Math.abs(power) * 9 * DEADMAN_S) : 0;   // ~9 °/s per %
     await this.nxt.setOutput(PORT_A, power * this.sign(PORT_A), MODE_ON | MODE_BRAKE | MODE_REGULATED, REG_SPEED, 0, RUN_RUNNING, limit);
     this.drivePower = power;
@@ -73,7 +76,7 @@ export class Robot {
       const d = (this.cfg.invSide ? -n : n) * 360;
       const [b, c] = await Promise.all([this.pos(PORT_B), this.pos(PORT_C)]);
       const tb = Math.round(b.p / 360) * 360 + d, tc = Math.round(c.p / 360) * 360 + d;
-      await this.moveTo([PORT_B, PORT_C], [tb, tc], this.cfg.sidePower, gen);
+      await this.moveOnce([PORT_B, PORT_C], [tb, tc], this.cfg.sidePower, gen);
     } finally { this.sideBusy = false; }
   }
 
@@ -83,7 +86,8 @@ export class Robot {
     return off(b.p) <= this.cfg.tolDeg && off(c.p) <= this.cfg.tolDeg;
   }
 
-  async goHome(gen = this.abortGen) {
+  // The "calibrate D wheels" button: turn B and C to the nearest home with correction passes.
+  async calibrate(gen = this.abortGen) {
     this.sideBusy = true;
     try {
       const [b, c] = await Promise.all([this.pos(PORT_B), this.pos(PORT_C)]);
@@ -103,10 +107,9 @@ export class Robot {
 
   // ------------------------------------------------------------ path runs
   async forward(cm, gen = this.abortGen) {
-    if (!(await this.isHome())) await this.goHome(gen);
     if (this.aTarget === null) this.aTarget = (await this.pos(PORT_A)).p;
-    this.aTarget += Math.round(cm / this.cfg.cmPerDegA);
-    await this.moveTo([PORT_A], [this.aTarget], this.cfg.drivePower, gen);
+    this.aTarget += Math.round(cm / this.cmPerDegA);
+    await this.moveOnce([PORT_A], [this.aTarget], this.cfg.drivePower, gen);
   }
 
   async runPath(moves, onStep) {
@@ -120,17 +123,40 @@ export class Robot {
     onStep?.(moves.length);
   }
 
-  // Calibration helper: drive A by whole turns; the user measures the distance.
-  async driveTurns(turns) {
-    if (!(await this.isHome())) await this.goHome();
-    const a = (await this.pos(PORT_A)).p;
-    await this.moveTo([PORT_A], [a + turns * 360], this.cfg.drivePower);
-  }
-
   async stop() {
     this.abortGen++;
     this.drivePower = 0;
     await this.nxt.brake();
+  }
+
+  // ------------------------------------------------------------ single moves
+  // One move to an absolute target, no correction pass. With LEGO 1.2x+ firmware the brick
+  // runs the tacho limit itself and brakes on target (B+C synchronised when they turn
+  // together); on 1.01, whose limits are off by ±25°, the loop below brakes it instead.
+  async moveOnce(ports, targets, power, gen = this.abortGen) {
+    if (!this.fwLimits) { await this.approach(ports, targets, power, gen); await this.settle(ports, gen); return; }
+    const now = await this.read(ports, gen);
+    const raw = targets.map((t, i) => (t - now[i].p) * this.sign(ports[i]));
+    const live = raw.map(r => Math.abs(r) > this.cfg.tolDeg);
+    if (!live.some(Boolean)) return;
+    const sync = ports.length === 2 && live[0] && live[1] && Math.sign(raw[0]) === Math.sign(raw[1]) && Math.abs(Math.abs(raw[0]) - Math.abs(raw[1])) < 20;
+    for (let i = 0; i < ports.length; i++) {
+      if (!live[i]) continue;
+      await this.nxt.setOutput(ports[i], Math.sign(raw[i]) * power, MODE_ON | MODE_BRAKE | MODE_REGULATED, sync ? REG_SYNC : REG_SPEED, 0, RUN_RUNNING, Math.abs(raw[i]));
+    }
+    // Done when the brick reports idle and the counters have stopped; stall = no motion for STALL_MS.
+    const t0 = performance.now();
+    let prev = now, lastMove = t0, quiet = t0;
+    for (;;) {
+      await sleep(POLL_MS);
+      const cur = await this.read(ports, gen);
+      const moved = cur.some((c, i) => c.p !== prev[i].p);
+      if (moved) lastMove = quiet = cur.t;
+      if (cur.every(c => c.run === RUN_IDLE) && cur.t - quiet >= SETTLE_MS) return;
+      if (!moved && cur.t - lastMove > STALL_MS && cur.some(c => c.run !== RUN_IDLE)) { await this.nxt.brake(); throw new Error('motor stalled - is something blocking it?'); }
+      if (cur.t - t0 > MOVE_TIMEOUT_MS) { await this.nxt.brake(); throw new Error('move timed out'); }
+      prev = cur;
+    }
   }
 
   // ------------------------------------------------------------ closed loop

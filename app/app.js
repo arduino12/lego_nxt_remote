@@ -2,10 +2,10 @@
 // Motor A drives forward/back; B+C turn D-profile wheels that step the robot sideways.
 import { Nxt, SerialTransport, UsbTransport, SPP_UUID, USB_FILTER, PORT_A, PORT_B, PORT_C, SCREEN_W, SCREEN_H, screenPixel, BT_OFF, BT_VISIBLE, BT_CONNECTED, BT_PIN_REQUEST } from './nxt.js';
 import { Robot, DEFAULTS, Aborted } from './motion.js';
-import { planPath, pathStats } from './path.js';
+import { snakePath, pathStats } from './path.js';
 
-const APP_VERSION = '0.1.0';   // keep in step with index.html (?v=) and sw.js
-const KEEPALIVE_MS = 30000, JOY_MS = 150, LCD_MS = 200, CAL_TURNS = 10;
+const APP_VERSION = '0.2.0';   // keep in step with index.html (?v=) and sw.js
+const KEEPALIVE_MS = 30000, JOY_MS = 150, LCD_MS = 200;
 const JOY_DEAD = 0.15, JOY_SIDE = 0.5, MIN_POWER = 15;
 
 // ------------------------------------------------------------ strings
@@ -16,19 +16,20 @@ const STR = {
     tabDrive: 'Drive', tabPath: 'Path', tabBrick: 'Brick',
     joyHint: 'Up/down drives (motor A). Left/right steps sideways, one B+C turn per step.',
     stepLeft: '◀ Step', stepRight: 'Step ▶', drivePower: 'Drive speed', sidePower: 'Side-step speed',
-    undo: 'Undo', clear: 'Clear', run: 'Run path', stopRun: 'Stop path', area: 'Area',
-    pathEmpty: 'Draw the route with your finger. The robot starts at the first point, facing up.',
-    pathInfo: '{0} moves · forward {1} cm · {2} side steps · ≈{3}',
-    pathDone: 'Path finished ✓', pathStep: 'Move {0}/{1}…',
+    run: 'Run snake', stopRun: 'Stop',
+    snakeTitle: 'Snake grid', rows: 'Rows', rowCm: 'Row length (cm)', sideTurns: 'Turns between rows (B+C)', sideDir: 'Shift to',
+    rowInfo: '= {0} wheel turns per row · {1} cm between rows',
+    pathEmpty: 'Set at least one row.',
+    pathInfo: '{0} rows · {1} cm driving · {2} side turns · ≈{3}',
+    pathDone: 'Finished ✓', pathStep: 'Row {0}/{1}…',
     screen: 'Brick screen', lcdLive: 'Live refresh',
     bt: 'Bluetooth: {0}', btOff: 'off', btOn: 'on', btVisible: 'visible', btHidden: 'hidden', btConnected: 'connected',
     btPin: 'waiting for the passkey - press ●',
     homeTitle: 'Side wheels home',
     homeHint: 'Turn B and C until the flat side of every D-wheel faces the floor, then tap "Set home". The brick counts from where the motors were at power-on, so switch it off with the wheels at home.',
     setHome: 'Set home here', goHome: 'Return home',
-    calTitle: 'Calibration',
-    calHint: 'Tap "Drive 10 turns", measure how far the robot went, type the centimetres and Save.',
-    calDrive: 'Drive 10 turns', save: 'Save', calInfo: 'Motor A: {0} cm per turn',
+    calTitle: 'Settings', wheelCm: 'Wheel diameter (cm)', calInfo: 'Motor A: {0} cm per turn',
+    calibD: 'Calibrate D wheels (flat side down)', hintCalibrating: 'Turning the D wheels to home…', hintCalibrated: 'D wheels at home ✓',
     invA: 'Reverse driving direction (A)', invSide: 'Reverse sideways direction',
     invB: 'Reverse motor B', invC: 'Reverse motor C',
     deadman: 'Stop by itself if the phone loses the connection',
@@ -39,7 +40,7 @@ const STR = {
     hintPair: 'First pair the NXT in the phone\'s Bluetooth settings (PIN 1234, then press ● on the brick), then tap Connect.',
     hintFail: 'Could not connect: {0}', hintLost: 'Connection lost. Tap Connect.',
     hintReconnect: 'Connection lost - reconnecting ({0}/3)…', hintConnectFirst: 'Connect to the brick first.',
-    hintCalDone: 'Measure how far it went and type the distance in cm.', hintSaved: 'Saved ✓',
+    hintSaved: 'Saved ✓',
     hintHomeSet: 'Home set ✓', credit: 'By Arad & Claude 2026',
   },
   he: {
@@ -48,19 +49,20 @@ const STR = {
     tabDrive: 'נהיגה', tabPath: 'מסלול', tabBrick: 'בקר',
     joyHint: 'למעלה/למטה - נסיעה (מנוע A). ימינה/שמאלה - צעד הצידה, סיבוב אחד של B+C לכל צעד.',
     stepLeft: '◀ צעד', stepRight: 'צעד ▶', drivePower: 'מהירות נסיעה', sidePower: 'מהירות צעד הצידה',
-    undo: 'ביטול', clear: 'ניקוי', run: 'הפעלת מסלול', stopRun: 'עצירת מסלול', area: 'גודל השטח',
-    pathEmpty: 'ציירו את המסלול באצבע. הרובוט מתחיל בנקודה הראשונה כשהוא פונה למעלה.',
-    pathInfo: '{0} תנועות · קדימה {1} ס"מ · {2} צעדי צד · ≈{3}',
-    pathDone: 'המסלול הסתיים ✓', pathStep: 'תנועה {0}/{1}…',
+    run: 'הפעלת שביל נחש', stopRun: 'עצירה',
+    snakeTitle: 'שביל נחש', rows: 'מספר שורות', rowCm: 'אורך שורה (ס"מ)', sideTurns: 'סיבובים בין שורות (B+C)', sideDir: 'כיוון ההזזה',
+    rowInfo: '= {0} סיבובי גלגל לשורה · {1} ס"מ בין שורות',
+    pathEmpty: 'הגדירו לפחות שורה אחת.',
+    pathInfo: '{0} שורות · {1} ס"מ נסיעה · {2} סיבובי צד · ≈{3}',
+    pathDone: 'הסתיים ✓', pathStep: 'שורה {0}/{1}…',
     screen: 'מסך הבקר', lcdLive: 'רענון חי',
     bt: 'בלוטות\': {0}', btOff: 'כבוי', btOn: 'דולק', btVisible: 'גלוי', btHidden: 'מוסתר', btConnected: 'מחובר',
     btPin: 'ממתין לקוד צימוד - לחצו ●',
     homeTitle: 'נקודת אפס לגלגלי הצד',
     homeHint: 'סובבו את B ו-C עד שהצד השטוח של כל גלגלי ה-D פונה לרצפה, ולחצו "קבע כאפס". הבקר סופר מהמקום שבו היו המנועים כשהודלק, לכן כבו אותו כשהגלגלים באפס.',
     setHome: 'קבע כאפס', goHome: 'חזרה לאפס',
-    calTitle: 'כיול',
-    calHint: 'לחצו "סע 10 סיבובים", מדדו כמה הרובוט נסע, הקלידו בס"מ ולחצו שמירה.',
-    calDrive: 'סע 10 סיבובים', save: 'שמירה', calInfo: 'מנוע A: {0} ס"מ לסיבוב',
+    calTitle: 'הגדרות', wheelCm: 'קוטר גלגל (ס"מ)', calInfo: 'מנוע A: {0} ס"מ לסיבוב',
+    calibD: 'כיול גלגלי D (צד שטוח למטה)', hintCalibrating: 'מסובב את גלגלי ה-D לאפס…', hintCalibrated: 'גלגלי ה-D באפס ✓',
     invA: 'היפוך כיוון הנסיעה (A)', invSide: 'היפוך כיוון התזוזה הצידה',
     invB: 'היפוך מנוע B', invC: 'היפוך מנוע C',
     deadman: 'עצירה אוטומטית אם הטלפון מאבד את החיבור',
@@ -71,7 +73,7 @@ const STR = {
     hintPair: 'קודם צמדו את ה-NXT בהגדרות הבלוטות\' של הטלפון (קוד 1234, ואז לחצו ● על הבקר), ואז לחצו "התחברות".',
     hintFail: 'החיבור נכשל: {0}', hintLost: 'החיבור נותק. לחצו "התחברות".',
     hintReconnect: 'החיבור נותק - מתחבר מחדש ({0}/3)…', hintConnectFirst: 'קודם התחברו לבקר.',
-    hintCalDone: 'מדדו כמה הרובוט נסע והקלידו את המרחק בס"מ.', hintSaved: 'נשמר ✓',
+    hintSaved: 'נשמר ✓',
     hintHomeSet: 'נקודת האפס נקבעה ✓', credit: 'מאת ארד וקלוד 2026',
   },
 };
@@ -89,7 +91,7 @@ const t = (key, ...args) => (STR[lang][key] ?? STR.en[key]).replace(/\{(\d)\}/g,
 function loadCfg() {
   let saved = {};
   try { saved = JSON.parse(localStorage.getItem('cfg') || '{}'); } catch {}
-  return { ...DEFAULTS, area: 200, ...saved };
+  return { ...DEFAULTS, rows: 4, rowCm: 100, sideTurns: 2, sideDir: 1, ...saved };
 }
 const cfg = loadCfg();
 function saveCfg() { try { localStorage.setItem('cfg', JSON.stringify(cfg)); } catch {} }
@@ -172,6 +174,7 @@ async function attach(tr) {
   $('stName').textContent = brickInfo.name;
   showBattery();
   $('infoFw').textContent = `${fw.firmware} (protocol ${fw.protocol})`;
+  robot.fwLimits = parseFloat(fw.firmware) >= 1.2;   // 1.01's tacho limits are off by ±25°
   $('infoAddr').textContent = brickInfo.btAddr;
   $('nameInput').value = brickInfo.name;
   clearInterval(keepTimer);
@@ -294,36 +297,14 @@ async function sideStep(dir) {
   try { await act(() => robot.sideSteps(dir)); } finally { stepping = false; }
 }
 
-// ------------------------------------------------------------ path
+// ------------------------------------------------------------ path (snake grid)
 const pc = $('pathCanvas'), pctx = pc.getContext('2d');
-let strokes = [], drawing = null, plan = null, runStep = -1, running = false;
-
-function toWorld(e) {
-  const r = pc.getBoundingClientRect();
-  return { x: (e.clientX - r.left) / r.width * cfg.area, y: (1 - (e.clientY - r.top) / r.height) * cfg.area };
-}
-
-pc.addEventListener('pointerdown', e => {
-  if (running || drawing) return;
-  try { pc.setPointerCapture(e.pointerId); } catch {}
-  drawing = { id: e.pointerId, pts: [toWorld(e)] };
-  strokes.push(drawing.pts);
-  replan();
-});
-pc.addEventListener('pointermove', e => {
-  if (!drawing || e.pointerId !== drawing.id) return;
-  const p = toWorld(e), last = drawing.pts[drawing.pts.length - 1];
-  if (Math.hypot(p.x - last.x, p.y - last.y) < cfg.area / 400) return;
-  drawing.pts.push(p);
-  replan();
-});
-for (const ev of ['pointerup', 'pointercancel']) pc.addEventListener(ev, e => {
-  if (drawing && e.pointerId === drawing.id) { drawing = null; replan(); }
-});
+let plan = null, runStep = -1, running = false;
 
 function replan() {
-  const pts = strokes.flat();
-  plan = pts.length > 1 ? planPath(pts, { stepCm: cfg.stepCm }) : null;
+  plan = snakePath({ rows: cfg.rows, rowCm: cfg.rowCm, sideTurns: cfg.sideTurns, stepCm: cfg.stepCm, sideDir: cfg.sideDir });
+  $('rowInfo').textContent = t('rowInfo', (cfg.rowCm / (Math.PI * cfg.wheelCm)).toFixed(2), cfg.sideTurns * cfg.stepCm);
+  for (const b of [$('dirL'), $('dirR')]) b.classList.toggle('on', +b.dataset.dir === cfg.sideDir);
   showPlan();
   requestAnimationFrame(drawPath);
 }
@@ -339,55 +320,48 @@ function showPlan() {
   if (!plan?.moves.length) { $('pathInfo').textContent = t('pathEmpty'); return; }
   const st = pathStats(plan.moves, cfg.stepCm);
   // Rough NXT motor speed under load: ~8 deg/s per % of power.
-  const fwdS = st.fwdCm / (cfg.cmPerDegA * 8 * cfg.drivePower);
-  const sideS = st.steps * (360 / (8 * cfg.sidePower) + 0.5);
-  $('pathInfo').textContent = t('pathInfo', plan.moves.length, Math.round(st.fwdCm), st.steps, fmtDuration(fwdS + sideS + plan.moves.length * 0.3));
+  const fwdS = st.fwdCm / (Math.PI * cfg.wheelCm / 360 * 8 * cfg.drivePower);
+  const sideS = st.steps * (360 / (8 * cfg.sidePower) + 0.3);
+  $('pathInfo').textContent = t('pathInfo', cfg.rows, Math.round(st.fwdCm), st.steps, fmtDuration(fwdS + sideS + plan.moves.length * 0.4));
 }
 
+// Top view at true scale: rows run up/down (motor A), shifts go left/right (B+C).
 function drawPath() {
   const dpr = window.devicePixelRatio || 1, w = pc.clientWidth, h = pc.clientHeight;
+  if (!w) return;
   if (pc.width !== Math.round(w * dpr)) { pc.width = Math.round(w * dpr); pc.height = Math.round(h * dpr); }
   const ctx = pctx;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
-  const sx = x => x / cfg.area * w, sy = y => h - y / cfg.area * h;
-
-  // Grid: one line per side lane when it is wide enough to see, bold every 50 cm.
-  const lanePx = cfg.stepCm / cfg.area * w;
-  for (let cm = 0; cm <= cfg.area; cm += cfg.stepCm) {
-    const major = cm % 50 === 0;
-    if (!major && lanePx < 5) continue;
-    ctx.strokeStyle = major ? '#2c313c' : '#1b1f27';
-    ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(sx(cm), 0); ctx.lineTo(sx(cm), h); ctx.stroke();
-    if (major) { ctx.beginPath(); ctx.moveTo(0, sy(cm)); ctx.lineTo(w, sy(cm)); ctx.stroke(); }
-  }
+  if (!plan?.moves.length) return;
+  const pts = plan.pts, m = 34;
+  const xs = pts.map(p => p.x), x0 = Math.min(...xs), x1 = Math.max(...xs), y1 = Math.max(cfg.rowCm, 1);
+  const k = Math.min((w - 2 * m) / Math.max(x1 - x0, 1e-9), (h - 2 * m) / y1);
+  const ox = (w - (x1 - x0) * k) / 2 - x0 * k, oy = h - (h - y1 * k) / 2;
+  const sx = x => ox + x * k, sy = y => oy - y * k;
 
   ctx.lineJoin = ctx.lineCap = 'round';
-  ctx.strokeStyle = '#8a90a066';
-  ctx.lineWidth = 2;
-  for (const s of strokes) {
-    ctx.beginPath();
-    s.forEach((p, i) => i ? ctx.lineTo(sx(p.x), sy(p.y)) : ctx.moveTo(sx(p.x), sy(p.y)));
-    ctx.stroke();
-  }
-
-  if (!plan) return;
-  const sp = plan.snapped;
   ctx.lineWidth = 4;
-  for (let i = 1; i < sp.length; i++) {
-    ctx.strokeStyle = !running ? '#6aa8ff' : i - 1 < runStep ? '#4cc38a' : i - 1 === runStep ? '#f0b44c' : '#6aa8ff';
-    ctx.beginPath(); ctx.moveTo(sx(sp[i - 1].x), sy(sp[i - 1].y)); ctx.lineTo(sx(sp[i].x), sy(sp[i].y)); ctx.stroke();
+  for (let i = 1; i < pts.length; i++) {
+    ctx.strokeStyle = !running ? '#6aa8ff' : i - 1 < runStep ? '#4cc38a' : i - 1 === runStep ? '#f0b44c' : '#2c3a52';
+    ctx.beginPath(); ctx.moveTo(sx(pts[i - 1].x), sy(pts[i - 1].y)); ctx.lineTo(sx(pts[i].x), sy(pts[i].y)); ctx.stroke();
   }
-  // Robot at the start, facing up.
-  const s0 = sp[0], rw = Math.max(10, 20 / cfg.area * w);
+  // Robot at the start, facing up; green dot at the end.
+  const rw = 14;
   ctx.fillStyle = '#e8eaf0';
-  ctx.fillRect(sx(s0.x) - rw / 2, sy(s0.y) - rw / 2, rw, rw);
+  ctx.fillRect(sx(0) - rw / 2, sy(0) - rw / 2, rw, rw);
   ctx.fillStyle = '#e5534b';
-  ctx.beginPath(); ctx.moveTo(sx(s0.x), sy(s0.y) - rw / 2 - 6); ctx.lineTo(sx(s0.x) - 5, sy(s0.y) - rw / 2); ctx.lineTo(sx(s0.x) + 5, sy(s0.y) - rw / 2); ctx.fill();
-  const e = sp[sp.length - 1];
+  ctx.beginPath(); ctx.moveTo(sx(0), sy(0) - rw / 2 - 7); ctx.lineTo(sx(0) - 5, sy(0) - rw / 2); ctx.lineTo(sx(0) + 5, sy(0) - rw / 2); ctx.fill();
+  const e = pts[pts.length - 1];
   ctx.fillStyle = '#4cc38a';
   ctx.beginPath(); ctx.arc(sx(e.x), sy(e.y), 6, 0, 2 * Math.PI); ctx.fill();
+  // Dimensions.
+  ctx.fillStyle = '#8a90a0';
+  ctx.font = '12px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.direction = 'ltr';   // the page is RTL in Hebrew; keep "100 cm" in order
+  ctx.fillText(`${cfg.rowCm} cm`, sx(x0) < 44 ? sx(x0) + 26 : sx(x0) - 26, sy(y1 / 2));
+  if (x1 > x0) ctx.fillText(`${Math.round(x1 - x0)} cm`, (sx(x0) + sx(x1)) / 2, Math.min(h - 6, sy(0) + 22));
 }
 
 async function runPath() {
@@ -400,7 +374,7 @@ async function runPath() {
   try {
     await robot.runPath(plan.moves, i => {
       runStep = i;
-      $('pathInfo').textContent = i < n ? t('pathStep', i + 1, n) : t('pathDone');
+      $('pathInfo').textContent = i < n ? t('pathStep', plan.moves[i].row + 1, cfg.rows) : t('pathDone');
       drawPath();
     });
   } catch (e) {
@@ -483,7 +457,7 @@ function showTab(name) {
   if (name === 'brick' && connState === 'on') lcdLoop();
 }
 
-function showCal() { $('calInfo').textContent = t('calInfo', (cfg.cmPerDegA * 360).toFixed(2)); }
+function showCal() { $('calInfo').textContent = t('calInfo', (Math.PI * cfg.wheelCm).toFixed(2)); }
 
 function bindSlider(id) {
   const el = $(id), out = $(id + 'Val');
@@ -503,11 +477,19 @@ $('stepR').addEventListener('click', () => sideStep(1));
 $('beepBtn').addEventListener('click', () => act(() => nxt.playTone(880, 250)));
 $('stopBtn').addEventListener('click', () => { stepping = false; if (robot) act(() => robot.stop()); });
 
-$('undoBtn').addEventListener('click', () => { if (!running) { strokes.pop(); replan(); } });
-$('clearBtn').addEventListener('click', () => { if (!running) { strokes = []; replan(); } });
 $('runBtn').addEventListener('click', runPath);
-$('area').value = cfg.area;
-$('area').addEventListener('change', () => { cfg.area = +$('area').value; saveCfg(); strokes = []; replan(); });
+for (const id of ['rows', 'rowCm', 'sideTurns', 'wheelCm']) {
+  const el = $(id);
+  el.value = cfg[id];
+  el.addEventListener('input', () => {
+    const v = parseFloat(el.value);
+    if (!(v >= 0)) return;
+    cfg[id] = id === 'rows' || id === 'sideTurns' ? Math.round(v) : v;
+    saveCfg(); replan(); showCal();
+  });
+}
+for (const b of [$('dirL'), $('dirR')]) b.addEventListener('click', () => { cfg.sideDir = +b.dataset.dir; saveCfg(); replan(); });
+$('calibBtn').addEventListener('click', () => act(async () => { setHint('hintCalibrating'); await robot.calibrate(); setHint('hintCalibrated'); }));
 
 for (const b of document.querySelectorAll('[data-btn]')) b.addEventListener('click', () => act(() => nxt.pressButton(+b.dataset.btn)));
 for (const b of document.querySelectorAll('[data-jog]')) b.addEventListener('click', () => {
@@ -515,14 +497,7 @@ for (const b of document.querySelectorAll('[data-jog]')) b.addEventListener('cli
   act(() => robot.jog(port, deg));
 });
 $('setHomeBtn').addEventListener('click', () => act(async () => { await robot.setHome(); setHint('hintHomeSet'); }));
-$('goHomeBtn').addEventListener('click', () => act(() => robot.goHome()));
-$('calDriveBtn').addEventListener('click', () => act(async () => { await robot.driveTurns(CAL_TURNS); setHint('hintCalDone'); $('calCm').focus(); }));
-$('calSaveBtn').addEventListener('click', () => {
-  const cm = parseFloat($('calCm').value);
-  if (!(cm > 0)) return;
-  cfg.cmPerDegA = cm / (CAL_TURNS * 360);
-  saveCfg(); showCal(); showPlan(); setHint('hintSaved');
-});
+$('goHomeBtn').addEventListener('click', () => act(() => robot.calibrate()));
 for (const el of document.querySelectorAll('[data-cfg]')) {
   el.checked = !!cfg[el.dataset.cfg];
   el.addEventListener('change', () => { cfg[el.dataset.cfg] = el.checked; saveCfg(); });

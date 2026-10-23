@@ -192,6 +192,51 @@ def run(nxt, cmd, args, out):
         out('rotation counters zeroed')
     elif cmd == 'brake':
         nxt.brake()
+    elif cmd == 'backup':   # backup DIR : copy every file off the brick
+        import os
+        os.makedirs(args[0], exist_ok=True)
+        names = []
+        run(nxt, 'files', [], lambda line: names.append(line[:20].rstrip()) if ' bytes' in line else None)
+        for name in names:
+            r = nxt.req(SYSTEM, 0x80, name.encode().ljust(20, b'\0'))   # OPEN READ
+            handle, size = r[3], struct.unpack_from('<I', r, 4)[0]
+            data = b''
+            while len(data) < size:
+                r = nxt.req(SYSTEM, 0x82, struct.pack('<BH', handle, min(58, size - len(data))))   # READ
+                data += r[6:6 + struct.unpack_from('<H', r, 4)[0]]
+            nxt.req(SYSTEM, 0x84, bytes([handle]))
+            with open(os.path.join(args[0], name), 'wb') as f:
+                f.write(data)
+            out(f'saved {name} ({len(data)} bytes)')
+    elif cmd == 'restore':   # restore DIR [names...] : upload files (linear, as NXT-G does for programs)
+        import os
+        for name in args[1:] or sorted(os.listdir(args[0])):
+            data = open(os.path.join(args[0], name), 'rb').read()
+            try:
+                r = nxt.req(SYSTEM, 0x89, name.encode().ljust(20, b'\0') + struct.pack('<I', len(data)))   # OPEN WRITE LINEAR
+            except IOError as e:
+                out(f'skip {name}: {e}')
+                continue
+            handle = r[3]
+            for i in range(0, len(data), 61):
+                nxt.req(SYSTEM, 0x83, bytes([handle]) + data[i:i + 61])   # WRITE
+            nxt.req(SYSTEM, 0x84, bytes([handle]))
+            out(f'restored {name} ({len(data)} bytes)')
+    elif cmd == 'files':   # files [pattern] : list the brick's flash file system
+        pat = (args[0] if args else '*.*').encode()[:19].ljust(20, b'\0')
+        try:
+            r = nxt.req(SYSTEM, 0x86, pat)   # FIND FIRST
+            while True:
+                handle = r[3]
+                name = r[4:24].split(b'\0')[0].decode('ascii', 'replace')
+                out(f'{name:20} {struct.unpack_from("<I", r, 24)[0]:7d} bytes')
+                try:
+                    r = nxt.req(SYSTEM, 0x87, bytes([handle]))   # FIND NEXT
+                except IOError:
+                    break
+            nxt.req(SYSTEM, 0x84, bytes([handle]))   # CLOSE
+        except IOError as e:
+            out(f'no (more) files: {e}')
     elif cmd == 'trace':
         # trace B 360 [power] [seconds] : start a tacho-limited move and sample the motor state over time
         port, deg = PORTS[args[0].upper()], int(args[1])
