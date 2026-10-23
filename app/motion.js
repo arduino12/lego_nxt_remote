@@ -5,8 +5,9 @@
 // All targets are absolute RotationCount values, so position errors never accumulate.
 //
 // With the NXT Improved Firmware the brick regulates position itself (RegMode 4, 1 kHz PID
-// with a speed/acceleration profile): every move is a target sent once, then the motor
-// holds it - no Bluetooth latency in the loop, and the D-wheels stay flat while A drives.
+// with a speed/acceleration profile): every move is a target sent once and the brick drives
+// to it - no Bluetooth latency in the loop. On arrival the motor is braked (holding the
+// target would hunt in the gear backlash).
 // Without it (LEGO firmware) a software loop here brakes the motors on target instead.
 import { PORT_A, PORT_B, PORT_C, MODE_ON, MODE_BRAKE, MODE_REGULATED, REG_SPEED, RUN_RUNNING } from './nxt.js';
 
@@ -24,6 +25,9 @@ export const DEFAULTS = {
 // Position regulation tuning, measured on this robot: PID 64/4/96 with acceleration 10
 // lands within ±1° and overshoots ~9° on a full turn (firmware default 96/32/32: 24°).
 const POS_PID = [64, 4, 96], POS_ACC = 10, CAL_SPEED = 30, CAL_ACC = 5;
+const A_TOL = 10;           // motor A: 10° = 0.5 cm is plenty, and its gear backlash makes 4° hunt
+const SYNC_LEAD = 90;       // B+C lockstep: how far the targets may run ahead of the slower motor
+const SYNC_STALL_MS = 4000; // ...and how long it may be held back before we give up
 const STALL_MS = 1500, MOVE_TIMEOUT_MS = 30000, SETTLE_MS = 120, POLL_MS = 5, SPEED_WINDOW_MS = 20;
 const BRAKE_S = 0.055;      // braking stops a motor within ~55 ms of travel (measured at 25-80 %)
 const DEADMAN_S = 0.6;      // joystick drive runs out this long after the last command
@@ -68,11 +72,15 @@ export class Robot {
     power = Math.round(power);
     const dir = Math.sign(power) * this.sign(PORT_A);
     if (this.posReg && this.cfg.deadman) {
-      if (power === 0 && this.drivePower === 0) return true;
+      if (power === 0) {   // brake rather than hold the last target: holding hunts in the backlash
+        if (this.drivePower !== 0 || this.pos_[PORT_A]) await this.release([PORT_A]);
+        this.drivePower = 0;
+        return true;
+      }
       const st = this.pos_[PORT_A];
       if (!st || Math.abs(st.speed - Math.abs(power)) >= 5) await this.regulate(PORT_A, Math.max(Math.abs(power), 10), POS_ACC * 2);
       const s = await this.pos(PORT_A);
-      const lead = power === 0 ? 0 : Math.max(60, Math.abs(power) * 9 * DEADMAN_S);   // ~9 °/s per %
+      const lead = Math.max(60, Math.abs(power) * 9 * DEADMAN_S);   // ~9 °/s per %
       await this.nxt.posTarget(PORT_A, s.tacho + dir * lead);
       this.drivePower = power;
       return true;
@@ -98,7 +106,8 @@ export class Robot {
       const d = (this.cfg.invSide ? -n : n) * 360;
       const [b, c] = await Promise.all([this.pos(PORT_B), this.pos(PORT_C)]);
       const tb = Math.round(b.p / 360) * 360 + d, tc = Math.round(c.p / 360) * 360 + d;
-      await this.moveOnce([PORT_B, PORT_C], [tb, tc], this.cfg.sidePower, POS_ACC, gen);
+      if (this.posReg) await this.lockstep([PORT_B, PORT_C], [tb, tc], this.cfg.sidePower, POS_ACC, gen);
+      else await this.moveOnce([PORT_B, PORT_C], [tb, tc], this.cfg.sidePower, POS_ACC, gen);
     } finally { this.sideBusy = false; }
   }
 
@@ -166,12 +175,52 @@ export class Robot {
       const st = this.pos_[p];
       if (!st || st.speed !== speed || st.acc !== acc) await this.regulate(p, speed, acc);
     }
-    for (let i = 0; i < ports.length; i++) {
-      const raw = targets[i] * this.sign(ports[i]);   // RotationCount units
-      await this.nxt.posTarget(ports[i], raw - this.pos_[ports[i]].offset);
+    for (let i = 0; i < ports.length; i++) await this.target(ports[i], targets[i]);
+    await this.waitTarget(ports, targets, gen);
+    await this.release(ports);
+  }
+
+  // B and C turn in lockstep: both targets advance together, never more than SYNC_LEAD
+  // degrees ahead of the motor that has come least far - so if one D-wheel is held back the
+  // other waits for it, and both finish the same number of turns (like the firmware's
+  // synchronised mode, which can't do exact position stops).
+  async lockstep(ports, targets, speed, acc, gen) {
+    for (const p of ports) {
+      const st = this.pos_[p];
+      if (!st || st.speed !== speed || st.acc !== acc) await this.regulate(p, speed, acc);
+    }
+    const s0 = await this.read(ports, gen);
+    const tot = targets.map((t, i) => t - s0[i].p);
+    const len = Math.max(...tot.map(Math.abs));
+    if (len <= this.cfg.tolDeg) { await this.release(ports); return; }
+    let frac = 0, best = 0, lastGain = s0.t;
+    while (frac < 1) {
+      const cur = await this.read(ports, gen);
+      const done = Math.min(...cur.map((c, i) => tot[i] ? (c.p - s0[i].p) / tot[i] : 1));
+      if (done > best + 0.01) { best = done; lastGain = cur.t; }
+      if (cur.t - lastGain > SYNC_STALL_MS) { await this.stop(); throw new Error('motor stalled - is something blocking it?'); }
+      const next = Math.min(1, Math.max(done, 0) + SYNC_LEAD / len);
+      if (next > frac) {
+        frac = next;
+        for (let i = 0; i < ports.length; i++) await this.target(ports[i], s0[i].p + tot[i] * frac);
+      }
+      await sleep(POLL_MS);
     }
     await this.waitTarget(ports, targets, gen);
+    await this.release(ports);
   }
+
+  // Send a logical-degree target to a regulated port (RotationCount -> TachoCount units).
+  target(port, logical) {
+    return this.nxt.posTarget(port, Math.round(logical * this.sign(port) - this.pos_[port].offset));
+  }
+
+  // Brake and leave position regulation: a held target hunts back and forth in gear backlash.
+  async release(ports) {
+    for (const p of ports) { await this.nxt.brake(p); delete this.pos_[p]; }
+  }
+
+  tol(port) { return port === PORT_A ? Math.max(this.cfg.tolDeg, A_TOL) : this.cfg.tolDeg; }
 
   // Start (or re-profile) position regulation on a port. A fresh start zeroes TachoCount,
   // which also zeroes the regulator's own target - so it holds where the motor is now.
@@ -199,7 +248,7 @@ export class Robot {
       await sleep(POLL_MS);
       const cur = await this.read(ports, gen);
       if (cur.some((c, i) => c.p !== prev[i].p)) lastMove = cur.t;
-      const ok = cur.every((c, i) => Math.abs(targets[i] - c.p) <= this.cfg.tolDeg);
+      const ok = cur.every((c, i) => Math.abs(targets[i] - c.p) <= this.tol(ports[i]));
       inSince = ok ? inSince ?? cur.t : null;
       if (ok && cur.t - inSince >= SETTLE_MS) return;
       if (!ok && cur.t - lastMove > STALL_MS) { await this.stop(); throw new Error('motor stalled - is something blocking it?'); }

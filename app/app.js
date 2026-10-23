@@ -4,7 +4,7 @@ import { Nxt, SerialTransport, UsbTransport, SPP_UUID, USB_FILTER, PORT_A, PORT_
 import { Robot, DEFAULTS, Aborted } from './motion.js';
 import { snakePath, pathStats } from './path.js';
 
-const APP_VERSION = '0.3.0';   // keep in step with index.html (?v=) and sw.js
+const APP_VERSION = '0.4.0';   // keep in step with index.html (?v=) and sw.js
 const KEEPALIVE_MS = 30000, JOY_MS = 150, LCD_MS = 200;
 const JOY_DEAD = 0.15, JOY_SIDE = 0.5, MIN_POWER = 15;
 
@@ -367,6 +367,17 @@ function drawPath() {
   if (x1 > x0) ctx.fillText(`${Math.round(x1 - x0)} cm`, (sx(x0) + sx(x1)) / 2, Math.min(h - 6, sy(0) + 22));
 }
 
+// Tunes from the brick's speaker: [Hz, ms] notes, one at a time (a new tone replaces the last).
+const TUNE_START = [[523, 110], [659, 110], [784, 220]];
+const TUNE_DONE = [[784, 110], [659, 110], [523, 110], [1047, 350]];
+const TUNE_STOP = [[392, 200], [262, 400]];
+async function tune(notes) {
+  for (const [hz, ms] of notes) {
+    await nxt.playTone(hz, ms);
+    await sleep(ms + 30);
+  }
+}
+
 async function runPath() {
   if (running) { await robot?.stop(); return; }
   if (!plan?.moves.length) return;
@@ -375,13 +386,16 @@ async function runPath() {
   $('runBtn').textContent = t('stopRun');
   const n = plan.moves.length;
   try {
+    await tune(TUNE_START);
     await robot.runPath(plan.moves, i => {
       runStep = i;
       $('pathInfo').textContent = i < n ? t('pathStep', plan.moves[i].row + 1, cfg.rows) : t('pathDone');
       drawPath();
     });
+    await tune(TUNE_DONE);
   } catch (e) {
     if (!(e instanceof Aborted)) setHint('hintFail', e.message, true);
+    if (nxt) tune(TUNE_STOP).catch(() => {});
   } finally {
     running = false;
     runStep = -1;
