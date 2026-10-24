@@ -7,7 +7,7 @@
   <title>NXT Remote</title>
   <link rel="manifest" href="manifest.json">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="style.css?v=0.4.1">
+  <link rel="stylesheet" href="style.css?v=0.5.0">
 </head>
 <body>
   <header>
@@ -74,7 +74,7 @@
     <section id="tab-brick" class="tab" hidden>
       <div class="card">
         <h2 data-t="screen"></h2>
-        <canvas id="lcd" class="lcd" width="100" height="64"></canvas>
+        <canvas id="lcd" class="lcd" width="110" height="74"></canvas>
         <div class="row nxt-buttons">
           <button data-btn="1">◀</button>
           <button data-btn="2" class="orange">●</button>
@@ -102,7 +102,12 @@
         <h2 data-t="calTitle"></h2>
         <label class="field"><span data-t="wheelCm"></span>
           <input id="wheelCm" type="number" inputmode="decimal" min="1" step="0.1" class="narrow"></label>
+        <label class="field"><span data-t="gear"></span>
+          <span class="gears"><input id="gearIn" type="number" inputmode="numeric" min="1" step="1" class="tiny"> <span data-t="gearArrow"></span>
+          <input id="gearOut" type="number" inputmode="numeric" min="1" step="1" class="tiny"></span></label>
         <p id="calInfo" class="hint"></p>
+        <label class="field"><span data-t="stepCm"></span>
+          <input id="stepCm" type="number" inputmode="decimal" min="0.5" step="0.5" class="narrow"></label>
         <label class="check"><input type="checkbox" data-cfg="invA"> <span data-t="invA"></span></label>
         <label class="check"><input type="checkbox" data-cfg="invSide"> <span data-t="invSide"></span></label>
         <label class="check"><input type="checkbox" data-cfg="invB"> <span data-t="invB"></span></label>
@@ -130,6 +135,6 @@
   <button id="stopBtn" class="stop" data-t="stop"></button>
   <footer id="footer"></footer>
 
-  <script type="module" src="app.js?v=0.4.1"></script>
+  <script type="module" src="app.js?v=0.5.0"></script>
 </body>
 </html>

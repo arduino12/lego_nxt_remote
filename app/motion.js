@@ -4,10 +4,10 @@
 // "home" (RotationCount a multiple of 360, flat side down) or they drag on the floor.
 // All targets are absolute RotationCount values, so position errors never accumulate.
 //
-// With the NXT Improved Firmware the brick regulates position itself (RegMode 4, 1 kHz PID
-// with a speed/acceleration profile): every move is a target sent once and the brick drives
-// to it - no Bluetooth latency in the loop. On arrival the motor is braked (holding the
-// target would hunt in the gear backlash).
+// With the NXT Improved Firmware the brick regulates position itself (RegMode 4, a PID with a
+// speed/acceleration profile): every move is a target sent once and the brick drives to it -
+// no Bluetooth latency in the loop. On arrival the motor is braked (windings shorted, like the
+// LEGO firmware at the end of a tacho limit), so it doesn't hum or drain the battery holding.
 // Without it (LEGO firmware) a software loop here brakes the motors on target instead.
 import { PORT_A, PORT_B, PORT_C, MODE_ON, MODE_BRAKE, MODE_REGULATED, REG_SPEED, RUN_RUNNING } from './nxt.js';
 
@@ -16,19 +16,23 @@ export const DEFAULTS = {
   drivePower: 75,      // joystick full scale and path rows (max speed), %
   sidePower: 50,       // side steps (max speed), %
   fixPower: 15,        // software-loop corrections, %
-  wheelCm: 6,          // drive wheel diameter; motor A turns the wheels 1:1
+  wheelCm: 5.6,        // drive wheel diameter
+  gearIn: 12, gearOut: 20,   // motor A's gear -> the wheels' gear (teeth)
   stepCm: 5,           // sideways travel per B+C turn
   tolDeg: 4,           // close enough to a target / to home
   deadman: true,       // joystick drive stops by itself if the link drops
 };
 
-// Position regulation tuning, measured on this robot: PID 64/4/96 with acceleration 10
-// lands within ±1° and overshoots ~9° on a full turn (firmware default 96/32/32: 24°).
-const POS_PID = [64, 4, 96], POS_ACC = 10, CAL_SPEED = 30, CAL_ACC = 5;
-const A_TOL = 10;           // motor A: 10° = 0.5 cm is plenty, and its gear backlash makes 4° hunt
+// Position regulation tuning, measured on this robot. The firmware runs the PID and steps the
+// profile only every RegulationTime ms, 100 by default: at that rate the profile's own setpoint
+// overshoots the target by 10-30° and swings back, and the motors hunt ±10° in the gear backlash.
+// At 10 ms, PID 128/32/192 (the firmware divides each by 32) lands side steps within 0-1° and
+// motor A within 1-3°, with no hunting.
+const REG_TIME_MS = 10, POS_PID = [128, 32, 192], POS_ACC = 10, CAL_SPEED = 30, CAL_ACC = 5;
+const A_TOL = 10;           // motor A: 10° = 0.3 cm of travel; finer is lost in the gear backlash anyway
 const SYNC_LEAD = 90;       // B+C lockstep: how far the targets may run ahead of the slower motor
 const SYNC_STALL_MS = 4000; // ...and how long it may be held back before we give up
-const HUNT_MS = 1000;       // still swinging within 3x tolerance after this long counts as arrived
+const HUNT_MS = 1000;       // still within 3x tolerance after this long counts as arrived (safety net)
 const DRIFT_CHECK_MS = 400; // after braking the D-wheels, look again: a loaded wheel can be pushed off
 const STALL_MS = 1500, MOVE_TIMEOUT_MS = 30000, SETTLE_MS = 120, POLL_MS = 5, SPEED_WINDOW_MS = 20;
 const BRAKE_S = 0.055;      // braking stops a motor within ~55 ms of travel (measured at 25-80 %)
@@ -53,7 +57,13 @@ export class Robot {
     this.onPos = null;       // (port, logicalDeg) for the UI
   }
 
-  get cmPerDegA() { return Math.PI * this.cfg.wheelCm / 360; }
+  get cmPerDegA() { return Math.PI * this.cfg.wheelCm * this.cfg.gearIn / this.cfg.gearOut / 360; }
+
+  // After connecting: use the brick's position regulation if it has it, at a usable rate.
+  async setup() {
+    this.posReg = await this.nxt.hasPosRegulation();
+    if (this.posReg) await this.nxt.setRegulationTime(REG_TIME_MS);
+  }
 
   sign(port) { return (port === PORT_A ? this.cfg.invA : port === PORT_B ? this.cfg.invB : this.cfg.invC) ? -1 : 1; }
 
@@ -74,7 +84,7 @@ export class Robot {
     power = Math.round(power);
     const dir = Math.sign(power) * this.sign(PORT_A);
     if (this.posReg && this.cfg.deadman) {
-      if (power === 0) {   // brake rather than hold the last target: holding hunts in the backlash
+      if (power === 0) {   // brake rather than hold the last target
         if (this.drivePower !== 0 || this.pos_[PORT_A]) await this.release([PORT_A]);
         this.drivePower = 0;
         return true;
@@ -211,7 +221,7 @@ export class Robot {
     await this.waitTarget(ports, targets, gen);
     await this.release(ports);
     // A braked motor can still be back-driven. If the robot's weight pushes a D-wheel off home,
-    // hold it there with the regulator instead (a small hunt beats a dragging wheel).
+    // hold it there with the regulator instead.
     await sleep(DRIFT_CHECK_MS);
     const after = await this.read(ports, gen);
     for (let i = 0; i < ports.length; i++) {
@@ -227,7 +237,7 @@ export class Robot {
     return this.nxt.posTarget(port, Math.round(logical * this.sign(port) - this.pos_[port].offset));
   }
 
-  // Stop and leave position regulation: a held target hunts back and forth in gear backlash.
+  // Stop and leave position regulation.
   async release(ports) {
     for (const p of ports) { await this.nxt.halt(p); delete this.pos_[p]; }
   }
@@ -252,8 +262,7 @@ export class Robot {
   }
 
   // Done when every port has stayed within tolerance for SETTLE_MS, or within 3x tolerance for
-  // HUNT_MS. (Holding a target the regulator dithers, and under load with gear backlash it can
-  // swing ±10° indefinitely - so "counter unchanged" would rarely come true.)
+  // HUNT_MS (a loaded motor that can't quite close the last few degrees).
   async waitTarget(ports, targets, gen) {
     const t0 = performance.now();
     let prev = await this.read(ports, gen), inSince = null, nearSince = null, lastMove = t0;

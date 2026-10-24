@@ -5,9 +5,15 @@ over Bluetooth from **Chrome on Android**. The page sends LEGO *direct commands*
 installed or started on the brick and no menu is needed at power-up.
 
 The brick runs the **NXT Improved Firmware 1.29.8** (Debian package `nxt-firmware`, LEGO 1.29 plus absolute
-position regulation). The brick drives B/C and A to absolute targets itself (1 kHz PID), so Bluetooth latency
-doesn't affect accuracy. Measured over Bluetooth: side steps land within 0–1° of home in about 2.5 s, and
-10 cm moves land within 3°. On plain LEGO firmware the app falls back to braking the motors itself.
+position regulation). The brick drives B/C and A to absolute targets itself (a PID following a speed/acceleration
+profile), so Bluetooth latency doesn't affect accuracy. On arrival the motor is braked (windings shorted), like the
+LEGO firmware at the end of a tacho limit. Measured over Bluetooth: side steps land within 0–1° of home in about
+3 s, and rows land within 2° of motor A (under 1 mm). On plain LEGO firmware the app falls back to braking the
+motors itself.
+
+The firmware runs that PID, and steps the profile, only every *RegulationTime* ms (Output IOMap byte 96). It's
+100 ms after power-on, and at that rate the profile's own setpoint overshoots the target by 10–30° and the motors
+hunt in the gear backlash. The app sets it to 10 ms when it connects.
 
 - **Drive tab**: a joystick. Up/down runs motor A (forward/back). Left/right does one B+C turn per step, which moves the robot 5 cm sideways.
 - **Path tab**: snake grid. Set the number of rows, row length (cm), and B+C turns between rows. The robot drives
@@ -19,9 +25,10 @@ doesn't affect accuracy. Measured over Bluetooth: side steps land within 0–1°
 
 ## Robot assumptions
 
-- Motor **A** drives all 4 wheels forward/back.
+- Motor **A** drives all 4 wheels forward/back, through a 12-tooth gear onto a 20-tooth gear on the 56 mm wheels:
+  10.56 cm per motor turn. Wheel diameter and the gear teeth are settings.
 - Motors **B + C** turn D-profile wheels mounted perpendicular to the drive direction. One full turn = one
-  5 cm sideways step. Between steps they must rest at **home** (flat side down), so every side move ends on a
+  sideways step (5 cm by default; a setting, used to draw the snake to scale). Between steps they must rest at **home** (flat side down), so every side move ends on a
   multiple of 360° of the motor's rotation counter.
 - The NXT zeroes its rotation counters at power-on. Switch it off with the D-wheels at home. Otherwise use
   *Brick → Side wheels home* to jog them and tap *Set home here*.

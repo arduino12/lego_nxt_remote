@@ -4,7 +4,7 @@ import { Nxt, SerialTransport, UsbTransport, SPP_UUID, USB_FILTER, PORT_A, PORT_
 import { Robot, DEFAULTS, Aborted } from './motion.js';
 import { snakePath, pathStats } from './path.js';
 
-const APP_VERSION = '0.4.1';   // keep in step with index.html (?v=) and sw.js
+const APP_VERSION = '0.5.0';   // keep in step with index.html (?v=) and sw.js
 const KEEPALIVE_MS = 30000, JOY_MS = 150, LCD_MS = 200;
 const JOY_DEAD = 0.15, JOY_SIDE = 0.5, MIN_POWER = 15;
 
@@ -28,7 +28,8 @@ const STR = {
     homeTitle: 'Side wheels home',
     homeHint: 'Turn B and C until the flat side of every D-wheel faces the floor, then tap "Set home". The brick counts from where the motors were at power-on, so switch it off with the wheels at home.',
     setHome: 'Set home here', goHome: 'Return home',
-    calTitle: 'Settings', wheelCm: 'Wheel diameter (cm)', calInfo: 'Motor A: {0} cm per turn',
+    calTitle: 'Settings', wheelCm: 'Wheel diameter (cm)', gear: 'Gears: motor A → wheels (teeth)', gearArrow: '→',
+    calInfo: 'Motor A: {0} cm per turn', stepCm: 'Sideways per B+C turn (cm)',
     calibD: 'Calibrate D wheels (flat side down)', hintCalibrating: 'Turning the D wheels to home…', hintCalibrated: 'D wheels at home ✓',
     invA: 'Reverse driving direction (A)', invSide: 'Reverse sideways direction',
     invB: 'Reverse motor B', invC: 'Reverse motor C',
@@ -61,7 +62,8 @@ const STR = {
     homeTitle: 'נקודת אפס לגלגלי הצד',
     homeHint: 'סובבו את B ו-C עד שהצד השטוח של כל גלגלי ה-D פונה לרצפה, ולחצו "קבע כאפס". הבקר סופר מהמקום שבו היו המנועים כשהודלק, לכן כבו אותו כשהגלגלים באפס.',
     setHome: 'קבע כאפס', goHome: 'חזרה לאפס',
-    calTitle: 'הגדרות', wheelCm: 'קוטר גלגל (ס"מ)', calInfo: 'מנוע A: {0} ס"מ לסיבוב',
+    calTitle: 'הגדרות', wheelCm: 'קוטר גלגל (ס"מ)', gear: 'גלגלי שיניים: מנוע A ← גלגלים', gearArrow: '←',
+    calInfo: 'מנוע A: {0} ס"מ לסיבוב', stepCm: 'תזוזה הצידה לסיבוב B+C (ס"מ)',
     calibD: 'כיול גלגלי D (צד שטוח למטה)', hintCalibrating: 'מסובב את גלגלי ה-D לאפס…', hintCalibrated: 'גלגלי ה-D באפס ✓',
     invA: 'היפוך כיוון הנסיעה (A)', invSide: 'היפוך כיוון התזוזה הצידה',
     invB: 'היפוך מנוע B', invC: 'היפוך מנוע C',
@@ -91,10 +93,12 @@ const t = (key, ...args) => (STR[lang][key] ?? STR.en[key]).replace(/\{(\d)\}/g,
 function loadCfg() {
   let saved = {};
   try { saved = JSON.parse(localStorage.getItem('cfg') || '{}'); } catch {}
+  if (saved.gearOut === undefined && saved.wheelCm === 6) delete saved.wheelCm;   // 0.4 default, before gearing
   return { ...DEFAULTS, rows: 4, rowCm: 100, sideTurns: 2, sideDir: 1, ...saved };
 }
 const cfg = loadCfg();
 function saveCfg() { try { localStorage.setItem('cfg', JSON.stringify(cfg)); } catch {} }
+const cmPerTurnA = () => Math.PI * cfg.wheelCm * cfg.gearIn / cfg.gearOut;
 
 // ------------------------------------------------------------ state
 const $ = id => document.getElementById(id);
@@ -177,7 +181,7 @@ async function attach(tr) {
   $('stName').textContent = brickInfo.name;
   showBattery();
   $('infoFw').textContent = `${fw.firmware} (protocol ${fw.protocol})`;
-  robot.posReg = await nxt.hasPosRegulation();   // NXT Improved Firmware: the brick positions motors itself
+  await robot.setup();   // NXT Improved Firmware: the brick positions motors itself
   $('infoAddr').textContent = brickInfo.btAddr;
   $('nameInput').value = brickInfo.name;
   clearInterval(keepTimer);
@@ -323,7 +327,7 @@ function showPlan() {
   if (!plan?.moves.length) { $('pathInfo').textContent = t('pathEmpty'); return; }
   const st = pathStats(plan.moves, cfg.stepCm);
   // Rough NXT motor speed under load: ~8 deg/s per % of power.
-  const fwdS = st.fwdCm / (Math.PI * cfg.wheelCm / 360 * 8 * cfg.drivePower);
+  const fwdS = st.fwdCm / (cmPerTurnA() / 360 * 8 * cfg.drivePower);
   const sideS = st.steps * (360 / (8 * cfg.sidePower) + 0.3);
   $('pathInfo').textContent = t('pathInfo', cfg.rows, Math.round(st.fwdCm), st.steps, fmtDuration(fwdS + sideS + plan.moves.length * 0.4));
 }
@@ -405,6 +409,7 @@ async function runPath() {
 }
 
 // ------------------------------------------------------------ brick tab
+const LCD_MARGIN = 5;   // blank glass around the pixels, as on the real LCD (canvas is 110 x 74)
 const lcd = $('lcd'), lctx = lcd.getContext('2d');
 const lcdImg = lctx.createImageData(SCREEN_W, SCREEN_H);
 let lcdRunning = false;
@@ -415,7 +420,7 @@ function drawLcd(buf) {
     const on = screenPixel(buf, x, y), i = (y * SCREEN_W + x) * 4;
     d[i] = on ? 0x1C : 0xA7; d[i + 1] = on ? 0x24 : 0xB4; d[i + 2] = on ? 0x16 : 0x8F; d[i + 3] = 255;
   }
-  lctx.putImageData(lcdImg, 0, 0);
+  lctx.putImageData(lcdImg, LCD_MARGIN, LCD_MARGIN);
 }
 
 async function lcdLoop() {
@@ -474,7 +479,7 @@ function showTab(name) {
   if (name === 'brick' && connState === 'on') lcdLoop();
 }
 
-function showCal() { $('calInfo').textContent = t('calInfo', (Math.PI * cfg.wheelCm).toFixed(2)); }
+function showCal() { $('calInfo').textContent = t('calInfo', cmPerTurnA().toFixed(2)); }
 
 function bindSlider(id) {
   const el = $(id), out = $(id + 'Val');
@@ -495,13 +500,13 @@ $('beepBtn').addEventListener('click', () => act(() => nxt.playTone(880, 250)));
 $('stopBtn').addEventListener('click', () => { stepping = false; if (robot) act(() => robot.stop()); });
 
 $('runBtn').addEventListener('click', runPath);
-for (const id of ['rows', 'rowCm', 'sideTurns', 'wheelCm']) {
+for (const id of ['rows', 'rowCm', 'sideTurns', 'wheelCm', 'gearIn', 'gearOut', 'stepCm']) {
   const el = $(id);
   el.value = cfg[id];
   el.addEventListener('input', () => {
     const v = parseFloat(el.value);
-    if (!(v >= 0)) return;
-    cfg[id] = id === 'rows' || id === 'sideTurns' ? Math.round(v) : v;
+    if (!(v >= 0) || (v === 0 && id.startsWith('gear'))) return;
+    cfg[id] = ['rows', 'sideTurns', 'gearIn', 'gearOut'].includes(id) ? Math.round(v) : v;
     saveCfg(); replan(); showCal();
   });
 }

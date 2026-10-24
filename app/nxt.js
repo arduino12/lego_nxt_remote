@@ -14,9 +14,10 @@ export const SCREEN_W = 100, SCREEN_H = 64;
 
 const DIRECT = 0x00, SYSTEM = 0x01, NO_REPLY = 0x80, REPLY = 0x02;
 const MOD_OUTPUT = 0x00020001, MOD_DISPLAY = 0x000A0001, MOD_UI = 0x000C0001;
-// Output IOMAP: 32 bytes per port. Flags at 18, RegP/I/D at 22-24, MaxSpeed/MaxAcceleration at 30-31
-// (the last two exist in the NXT Improved Firmware, src/c_output.iom).
-const OUT_FLAGS = 18, OUT_PID = 22, OUT_MAX = 30;
+// Output IOMAP: 32 bytes per port. Flags at 18, RegP/I/D at 22-24, MaxSpeed/MaxAcceleration at 30-31,
+// then after the 3 ports RegulationTime at 96 (the last three exist in the NXT Improved Firmware,
+// src/c_output.iom).
+const OUT_FLAGS = 18, OUT_PID = 22, OUT_MAX = 30, OUT_REG_TIME = 96;
 const UF_RESET_COUNT = 0x08, UF_PID_VALUES = 0x10;
 const DISP_FLAGS = 117, DISP_NORMAL = 119, DISP_POPUP = 919, DISP_F_POPUP = 0x08;
 const UI_FLAGS = 26, UI_BUTTON = 28;
@@ -235,13 +236,15 @@ export class Nxt {
   }
 
   // ---- absolute position regulation (NXT Improved Firmware, RegMode 4) ----
-  // The brick PID-regulates the motor to a target in TachoCount units at 1 kHz, following a
+  // The brick PID-regulates the motor to a target in TachoCount units, following a
   // speed/acceleration profile - no link latency in the loop. posInit zeroes TachoCount
   // (which also zeroes the regulator's target, so nothing jumps) and sets the profile.
   async hasPosRegulation() {
     const b = await this.readIOMap(MOD_OUTPUT, OUT_MAX, 2);   // LEGO 1.29 keeps these spare bytes at 0
     return b[0] !== 0 || b[1] !== 0;
   }
+  // How often the PID and the profile step, in ms (all ports; RAM only, 100 after power-on).
+  setRegulationTime(ms) { return this.writeIOMap(MOD_OUTPUT, OUT_REG_TIME, [ms]); }
   async posInit(port, { maxSpeed, maxAcc, pid }) {
     const base = port * 32;
     if (pid) await this.writeIOMap(MOD_OUTPUT, base + OUT_PID, pid);

@@ -101,7 +101,7 @@ nav.tabs button.active { background: var(--accent); color: var(--accent-ink); }
 canvas.path { width: 100%; aspect-ratio: 1; background: #12151b; border-radius: 10px; touch-action: none; }
 
 canvas.lcd {
-  width: min(100%, 400px); aspect-ratio: 100 / 64; margin: 0 auto; display: block;
+  width: min(100%, 440px); aspect-ratio: 110 / 74; margin: 0 auto; display: block;
   image-rendering: pixelated; background: var(--lcd-bg); border-radius: 6px;
 }
 .nxt-buttons { justify-content: center; direction: ltr; }
@@ -130,6 +130,8 @@ footer { color: var(--muted); font-size: .75rem; text-align: center; padding: 16
 .form label { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: .95rem; }
 .form input { width: 110px; text-align: center; }
 input.narrow { width: 110px; text-align: center; }
+input.tiny { width: 56px; text-align: center; }
+.gears { white-space: nowrap; }
 .seg { display: flex; gap: 0; }
 .seg button { min-width: 54px; border-radius: 0; }
 .seg button:first-child { border-radius: 10px 0 0 10px; }
